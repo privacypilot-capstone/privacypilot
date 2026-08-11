@@ -1,3 +1,4 @@
+from scoring import calculate_compliance_score
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -56,6 +57,9 @@ def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
         violations = run_dpdp_rules(
             code_findings, policy_claims, gap_categories
         )
+        compliance = calculate_compliance_score(
+            violations, len(code_findings), len(gap_categories)
+        )
 
         # ── Step 5: Save to PostgreSQL ────────────────────────────────────────
         scan = Scan(
@@ -109,6 +113,7 @@ def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
             "violations_count":   len(violations),
             "violations":         [v.to_dict() for v in violations],
             "sample_findings":    [f.model_dump() for f in code_findings[:5]],
+            "compliance": compliance,
         }
 
     except Exception as e:

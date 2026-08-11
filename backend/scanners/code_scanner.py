@@ -1,6 +1,7 @@
 import re
 from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
+from scanners.presidio_scanner import scan_text_with_presidio
 
 PII_PATTERNS = {
     PIICategory.AADHAAR:   r'\b(aadhaar|aadhar|aadhar_no|aadhaar_number)\b',
@@ -16,9 +17,9 @@ PII_PATTERNS = {
 }
 
 THIRD_PARTY_SDKS = [
-    'firebase','firestore','sentry','mixpanel',
-    'amplitude','segment','twilio','sendgrid',
-    'analytics','crashlytics','clevertap',
+    'firebase', 'firestore', 'sentry', 'mixpanel',
+    'amplitude', 'segment', 'twilio', 'sendgrid',
+    'analytics', 'crashlytics', 'clevertap',
 ]
 
 SENSITIVITY_MAP = {
@@ -34,6 +35,18 @@ SENSITIVITY_MAP = {
     PIICategory.DOB:       Sensitivity.PERSONAL,
 }
 
+PRESIDIO_MAP = {
+    "PERSON":           (PIICategory.NAME,      Sensitivity.PERSONAL),
+    "PHONE_NUMBER":     (PIICategory.PHONE,     Sensitivity.PERSONAL),
+    "PHONE":            (PIICategory.PHONE,     Sensitivity.PERSONAL),
+    "EMAIL_ADDRESS":    (PIICategory.EMAIL,     Sensitivity.PERSONAL),
+    "AADHAAR":          (PIICategory.AADHAAR,   Sensitivity.SENSITIVE),
+    "IN_PAN":           (PIICategory.PAN,       Sensitivity.SENSITIVE),
+    "LOCATION":         (PIICategory.LOCATION,  Sensitivity.PERSONAL),
+    "MEDICAL_LICENSE":  (PIICategory.HEALTH,    Sensitivity.SENSITIVE),
+}
+
+
 def scan_github_repo(repo_url: str, github_token: str) -> list:
     findings = []
     repo_name = repo_url.rstrip('/').split('github.com/')[-1]
@@ -48,18 +61,25 @@ def scan_github_repo(repo_url: str, github_token: str) -> list:
         any(f.path.endswith(ext) for ext in ['.py', '.js', '.ts'])
     ]
 
-    print(f"[scanner] {len(target_files)} files found in {repo_name}")
+    # Limit for speed during development
+    target_files = target_files[:300]
+    print(f"[scanner] {len(target_files)} files to scan in {repo_name}")
 
     for file_obj in target_files:
         try:
             content = repo.get_contents(file_obj.path)
             text = content.decoded_content.decode('utf-8', errors='ignore')
+
             for line_num, line in enumerate(text.splitlines(), 1):
                 line_lower = line.lower()
+                matched = False
+
+                # Pass 1 — regex (fast)
                 for category, pattern in PII_PATTERNS.items():
                     if re.search(pattern, line_lower):
                         third_party = next(
-                            (s for s in THIRD_PARTY_SDKS if s in line_lower), None
+                            (s for s in THIRD_PARTY_SDKS if s in line_lower),
+                            None
                         )
                         findings.append(DataFlowObject(
                             source="code_scanner",
@@ -68,10 +88,36 @@ def scan_github_repo(repo_url: str, github_token: str) -> list:
                             raw_text=line.strip()[:200],
                             field_name=category.value,
                             pii_category=category,
-                            sensitivity=SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN),
+                            sensitivity=SENSITIVITY_MAP.get(
+                                category, Sensitivity.UNKNOWN
+                            ),
                             third_party_sdk=third_party,
                         ))
+                        matched = True
                         break
+
+                # Pass 2 — Presidio NER (catches what regex missed)
+                if not matched and len(line.strip()) > 10:
+                    presidio_hits = scan_text_with_presidio(line)
+                    for hit in presidio_hits:
+                        if hit in PRESIDIO_MAP:
+                            cat, sens = PRESIDIO_MAP[hit]
+                            third_party = next(
+                                (s for s in THIRD_PARTY_SDKS
+                                 if s in line_lower), None
+                            )
+                            findings.append(DataFlowObject(
+                                source="presidio_scanner",
+                                file_path=file_obj.path,
+                                line_number=line_num,
+                                raw_text=line.strip()[:200],
+                                field_name=hit.lower(),
+                                pii_category=cat,
+                                sensitivity=sens,
+                                third_party_sdk=third_party,
+                            ))
+                            break
+
         except Exception as e:
             print(f"[scanner] skipped {file_obj.path}: {e}")
 

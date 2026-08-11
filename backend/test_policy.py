@@ -1,7 +1,11 @@
-from scanners.policy_parser import parse_privacy_policy
+from scoring import calculate_compliance_score
 
-# Test 1 — plain HTML page, definitely works
-results = parse_privacy_policy('https://parth268.github.io/App-Privacy-Policy/PrivacyPolicy.html')
-print(f'Test 1 - Policy claims: {len(results)}')
-for r in results:
-    print(f'  {r.pii_category.value}')
+# Fake violations to test scoring
+class FakeV:
+    def __init__(self, s): self.severity = s
+
+violations = [FakeV("critical"), FakeV("critical"), FakeV("high"), FakeV("high"), FakeV("high")]
+result = calculate_compliance_score(violations, 1649, 3)
+print(f"Score: {result['score']}/100")
+print(f"Rating: {result['rating']}")
+print(f"Critical: {result['critical_count']}, High: {result['high_count']}")
