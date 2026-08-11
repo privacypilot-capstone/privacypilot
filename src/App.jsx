@@ -95,6 +95,43 @@ export default function App() {
             </>
           )}
 
+          {result.violations && result.violations.length > 0 && (
+  <>
+    <h3 style={{ marginTop: '1.5rem' }}>🚨 DPDP Violations</h3>
+    {result.violations.map((v, i) => (
+      <div key={i} style={{
+        border: `1px solid ${v.severity === 'critical' ? '#dc3545' : '#fd7e14'}`,
+        borderRadius: '8px', padding: '1rem', marginBottom: '10px',
+        background: v.severity === 'critical' ? '#fff5f5' : '#fff8f0'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <strong>{v.dpdp_section} — {v.section_title}</strong>
+          <span style={{
+            background: v.severity === 'critical' ? '#dc3545' : '#fd7e14',
+            color: '#fff', padding: '2px 10px', borderRadius: '99px',
+            fontSize: '12px', fontWeight: 'bold'
+          }}>{v.severity.toUpperCase()}</span>
+        </div>
+        <p style={{ fontSize: '13px', margin: '8px 0 4px', color: '#444' }}>
+          <strong>PII Type:</strong> {v.pii_category}
+        </p>
+        <p style={{ fontSize: '13px', margin: '4px 0', color: '#555' }}>
+          <strong>Evidence:</strong> {v.evidence}
+        </p>
+        <p style={{ fontSize: '13px', margin: '4px 0', color: '#2d6a4f' }}>
+          <strong>Fix:</strong> {v.recommendation}
+        </p>
+      </div>
+    ))}
+  </>
+)}
+
+{result.scan_id && (
+  <p style={{ marginTop: '1rem', fontSize: '12px', color: '#888' }}>
+    Scan ID: {result.scan_id} — saved to database
+  </p>
+)}
+
           <h3 style={{ marginTop: '1.5rem' }}>Sample Code Findings</h3>
           {result.sample_findings.map((f, i) => (
             <div key={i} style={{ ...STYLE.gap, background: '#e8f4fd', borderColor: '#0d6efd' }}>
