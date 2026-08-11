@@ -47,7 +47,6 @@ export default function App() {
 
   return (
     <>
-      {/* Navbar */}
       <div style={{ background: '#1a1a2e', padding: '10px 2rem', display: 'flex', gap: '20px' }}>
         <span style={{ color: '#fff', fontWeight: 'bold' }}>PrivacyPilot</span>
         <a href="/" style={{ color: '#aaa', fontSize: '14px', textDecoration: 'none' }}>New Scan</a>
@@ -83,7 +82,6 @@ export default function App() {
           <div style={STYLE.result}>
             <h2>Scan Results</h2>
 
-            {/* Compliance Score Gauge */}
             {result.compliance && (
               <div style={{
                 textAlign: 'center', padding: '1.5rem', background: '#fff',
@@ -103,7 +101,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Stats */}
             <div>
               <span style={STYLE.stat}>{result.code_findings_count} PII findings in code</span>
               <span style={STYLE.stat}>{result.policy_claims_count} claims in policy</span>
@@ -112,7 +109,6 @@ export default function App() {
               </span>
             </div>
 
-            {/* Consent Gaps */}
             {result.gaps_count > 0 && (
               <>
                 <h3 style={{ marginTop: '1.5rem' }}>⚠️ Consent Gaps Detected</h3>
@@ -125,7 +121,6 @@ export default function App() {
               </>
             )}
 
-            {/* DPDP Violations */}
             {result.violations && result.violations.length > 0 && (
               <>
                 <h3 style={{ marginTop: '1.5rem' }}>🚨 DPDP Violations</h3>
@@ -157,7 +152,6 @@ export default function App() {
               </>
             )}
 
-            {/* Sample Findings */}
             <h3 style={{ marginTop: '1.5rem' }}>Sample Code Findings</h3>
             {result.sample_findings.map((f, i) => (
               <div key={i} style={{ ...STYLE.gap, background: '#e8f4fd', borderColor: '#0d6efd' }}>
@@ -167,10 +161,32 @@ export default function App() {
             ))}
 
             {result.scan_id && (
-              <p style={{ marginTop: '1rem', fontSize: '12px', color: '#888' }}>
-                Scan #{result.scan_id} saved to database ✓
-              </p>
-            )}
+  <div style={{ marginTop: '1.2rem' }}>
+    <p style={{ fontSize: '12px', color: '#888', marginBottom: '10px' }}>
+      Scan #{result.scan_id} saved to database ✓
+    </p>
+    <div style={{ display: 'flex', gap: '10px' }}>
+      <button
+        onClick={() => window.open('http://localhost:8000/report/' + result.scan_id, '_blank')}
+        style={{
+          padding: '8px 20px', fontSize: '13px', borderRadius: '6px',
+          background: '#1a1a2e', color: '#fff', border: 'none', cursor: 'pointer'
+        }}
+      >
+        View Full Report
+      </button>
+      <button
+        onClick={() => window.open('http://localhost:8000/report/' + result.scan_id + '?format=pdf')}
+        style={{
+          padding: '8px 20px', fontSize: '13px', borderRadius: '6px',
+          background: '#dc3545', color: '#fff', border: 'none', cursor: 'pointer'
+        }}
+      >
+        Download PDF
+      </button>
+    </div>
+  </div>
+)}
           </div>
         )}
       </div>
