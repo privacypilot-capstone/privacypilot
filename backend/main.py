@@ -32,6 +32,18 @@ class ScanRequest(BaseModel):
     privacy_policy_url: str
     github_token:       str
 
+    def __repr__(self):
+        # Security: token is always redacted from logs and error traces
+        return (
+            f"ScanRequest("
+            f"repo={self.github_repo_url!r}, "
+            f"policy={self.privacy_policy_url!r}, "
+            f"token=***REDACTED***)"
+        )
+
+    def __str__(self):
+        return self.__repr__()
+
 
 @app.get("/health")
 def health():
@@ -40,33 +52,59 @@ def health():
 
 @app.post("/scan")
 def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
+
+    # Security: never log the GitHub token
+    print(f"[scan] Starting scan — repo: {req.github_repo_url}")
+    print(f"[scan] Policy URL: {req.privacy_policy_url}")
+    # Token is passed directly to PyGitHub and never stored or logged
+
+    # ── Point 10: Pre-commit scan record with status=running ─────────────────
+    # This ensures a DB record exists even if the scan fails midway.
+    # A browser refresh or server crash will not lose the scan entirely.
+    scan = Scan(
+        repo_url   = req.github_repo_url,
+        policy_url = req.privacy_policy_url,
+        status     = "running",
+    )
+    db.add(scan)
+    db.commit()
+    scan_id = scan.id
+    print(f"[scan] Scan {scan_id} created with status=running")
+
     try:
-        code_findings = scan_github_repo(req.github_repo_url, req.github_token)
+        # ── Step 1: Scan source code ──────────────────────────────────────────
+        code_findings = scan_github_repo(
+            req.github_repo_url, req.github_token
+        )
+
+        # ── Step 2: Parse privacy policy ─────────────────────────────────────
+        # URL validation happens inside parse_privacy_policy()
         policy_claims = parse_privacy_policy(req.privacy_policy_url)
 
+        # ── Step 3: Detect consent gaps ───────────────────────────────────────
         code_pii       = {f.pii_category for f in code_findings}
         policy_pii     = {f.pii_category for f in policy_claims}
         gap_categories = code_pii - policy_pii
 
-        violations = run_dpdp_rules(code_findings, policy_claims, gap_categories)
+        # ── Step 4: Run DPDP Rule Engine ──────────────────────────────────────
+        violations = run_dpdp_rules(
+            code_findings, policy_claims, gap_categories
+        )
         compliance = calculate_compliance_score(
             violations, len(code_findings), len(gap_categories)
         )
 
-        scan = Scan(
-            repo_url         = req.github_repo_url,
-            policy_url       = req.privacy_policy_url,
-            findings_count   = len(code_findings),
-            policy_count     = len(policy_claims),
-            gaps_count       = len(gap_categories),
-            violations_count = len(violations),
-        )
-        db.add(scan)
-        db.flush()
+        # ── Step 5: Update scan record with results ───────────────────────────
+        scan.findings_count   = len(code_findings)
+        scan.policy_count     = len(policy_claims)
+        scan.gaps_count       = len(gap_categories)
+        scan.violations_count = len(violations)
+        scan.status           = "complete"
 
+        # Save findings (first 200)
         for f in code_findings[:200]:
             db.add(Finding(
-                scan_id         = scan.id,
+                scan_id         = scan_id,
                 source          = f.source,
                 file_path       = f.file_path,
                 line_number     = f.line_number,
@@ -78,9 +116,10 @@ def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
                 is_gap          = f.pii_category in gap_categories,
             ))
 
+        # Save violations
         for v in violations:
             db.add(Violation(
-                scan_id        = scan.id,
+                scan_id        = scan_id,
                 dpdp_section   = v.dpdp_section,
                 section_title  = v.section_title,
                 severity       = v.severity,
@@ -90,10 +129,11 @@ def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
             ))
 
         db.commit()
-        print(f"[db] Scan {scan.id} saved — {len(violations)} violations")
+        print(f"[db] Scan {scan_id} complete — {len(violations)} violations")
 
+        # ── Step 6: Return response ───────────────────────────────────────────
         return {
-            "scan_id":             scan.id,
+            "scan_id":             scan_id,
             "code_findings_count": len(code_findings),
             "policy_claims_count": len(policy_claims),
             "gaps_detected":       [g.value for g in gap_categories],
@@ -105,7 +145,13 @@ def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
         }
 
     except Exception as e:
-        db.rollback()
+        # Update scan status to failed — preserves audit trail
+        try:
+            scan.status = "failed"
+            db.commit()
+            print(f"[db] Scan {scan_id} marked as failed")
+        except Exception:
+            db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -119,12 +165,32 @@ def get_all_scans(db: Session = Depends(get_db)):
         "findings_count":   s.findings_count,
         "violations_count": s.violations_count,
         "gaps_count":       s.gaps_count,
+        "status":           s.status,
     } for s in scans]
+
+
+@app.get("/scans/{scan_id}/status")
+def get_scan_status(scan_id: int, db: Session = Depends(get_db)):
+    """
+    Poll the status of a running scan.
+    Returns: running / complete / failed
+    Useful for async polling and failure recovery.
+    """
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return {
+        "scan_id":  scan_id,
+        "status":   scan.status,
+        "repo_url": scan.repo_url,
+    }
 
 
 @app.get("/scans/{scan_id}/violations")
 def get_violations(scan_id: int, db: Session = Depends(get_db)):
-    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
+    violations = db.query(Violation).filter(
+        Violation.scan_id == scan_id
+    ).all()
     return [{
         "dpdp_section":   v.dpdp_section,
         "section_title":  v.section_title,
@@ -136,13 +202,21 @@ def get_violations(scan_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/report/{scan_id}")
-def get_report(scan_id: int, format: str = "html", db: Session = Depends(get_db)):
+def get_report(
+    scan_id: int,
+    format: str = "html",
+    db: Session = Depends(get_db)
+):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
-    findings   = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+    violations = db.query(Violation).filter(
+        Violation.scan_id == scan_id
+    ).all()
+    findings = db.query(Finding).filter(
+        Finding.scan_id == scan_id
+    ).all()
 
     class FakeV:
         def __init__(self, s): self.severity = s
@@ -163,10 +237,14 @@ def get_report(scan_id: int, format: str = "html", db: Session = Depends(get_db)
                 content=pdf_bytes,
                 media_type="application/pdf",
                 headers={
-                    "Content-Disposition": f"attachment; filename=report_{scan_id}.pdf"
+                    "Content-Disposition":
+                        f"attachment; filename=report_{scan_id}.pdf"
                 }
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"PDF error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"PDF error: {e}"
+            )
 
     return HTMLResponse(content=html)

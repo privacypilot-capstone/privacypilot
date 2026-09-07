@@ -20,11 +20,13 @@ class Scan(Base):
     id           = Column(Integer, primary_key=True, index=True)
     repo_url     = Column(String, nullable=False)
     policy_url   = Column(String, nullable=False)
+    status = Column(String, default="running")
     created_at   = Column(DateTime, default=datetime.utcnow)
     findings_count   = Column(Integer, default=0)
     policy_count     = Column(Integer, default=0)
     gaps_count       = Column(Integer, default=0)
     violations_count = Column(Integer, default=0)
+    
 
     findings   = relationship("Finding",   back_populates="scan")
     violations = relationship("Violation", back_populates="scan")
