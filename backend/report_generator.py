@@ -51,6 +51,13 @@ def generate_report_html(scan, violations, findings, compliance) -> str:
     critical    = compliance.get("critical_count", 0)
     high        = compliance.get("high_count", 0)
 
+    # Deduplicated gap chips — computed before the f-string to avoid lambda-in-fstring issues
+    _gap_cats = sorted(dict.fromkeys(f.pii_category for f in findings if f.is_gap))
+    gaps_html = (
+        "".join(f'<span class="gap-tag">{c}</span>' for c in _gap_cats)
+        if _gap_cats else '<p style="color:#888">No gaps detected.</p>'
+    )
+
     html = f"""
 <!DOCTYPE html>
 <html>
@@ -175,8 +182,7 @@ def generate_report_html(scan, violations, findings, compliance) -> str:
   <p style="font-size:12px;color:#555;margin-bottom:10px">
     These PII types are processed in the source code but are NOT disclosed in the privacy policy:
   </p>
-  {''.join(f'<span class="gap-tag">{f.pii_category}</span>'
-            for f in findings if f.is_gap) or '<p style="color:#888">No gaps detected.</p>'}
+  {gaps_html}
 
   <!-- Violations -->
   <div class="section-title">DPDP Act Violations</div>

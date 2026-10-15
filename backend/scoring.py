@@ -4,15 +4,18 @@ def calculate_compliance_score(
     gaps_count: int
 ) -> dict:
     """
-    Score from 0 to 100.
+    Score from 0 to 100.  S = max(0, 100 − 15·|CRITICAL| − 8·|HIGH| − 4·|MEDIUM|)
     100 = fully compliant
     0   = critically non-compliant
+
+    Note: gap count is passed in for reporting purposes only — it is NOT
+    subtracted from the score.  Gaps are already represented as Section 5 /
+    Section 6(1) CRITICAL or HIGH violations by the rule engine, so
+    double-penalising them would distort the metric.
     """
 
-    # Start at 100, deduct for violations
+    # Start at 100, deduct for violations by severity
     score = 100
-
-    # Deduct per violation by severity
     for v in violations:
         if v.severity == "critical":
             score -= 15
@@ -21,13 +24,10 @@ def calculate_compliance_score(
         elif v.severity == "medium":
             score -= 4
 
-    # Deduct for each consent gap
-    score -= gaps_count * 5
-
     # Floor at 0
     score = max(0, score)
 
-    # Determine rating
+    # Determine rating band
     if score >= 80:
         rating = "Good"
         color  = "#28a745"
@@ -48,4 +48,5 @@ def calculate_compliance_score(
         "total_violations":  len(violations),
         "critical_count": sum(1 for v in violations if v.severity == "critical"),
         "high_count":     sum(1 for v in violations if v.severity == "high"),
+        "medium_count":   sum(1 for v in violations if v.severity == "medium"),
     }
