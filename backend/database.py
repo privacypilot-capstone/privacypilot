@@ -5,10 +5,16 @@ import os
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://pilot:pilot@db:5432/privacypilot"
+    "sqlite:///./privacypilot.db"   # local dev default; override in .env for Postgres
 )
+# SQLAlchemy 2.x maps plain postgresql:// → psycopg3; we ship psycopg2, so
+# rewrite the scheme to use the psycopg2 dialect explicitly.
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
-engine = create_engine(DATABASE_URL)
+# SQLite needs check_same_thread=False for FastAPI's threading model
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -99,8 +105,10 @@ def create_tables():
 def migrate_tables():
     """Apply additive schema migrations to existing tables (idempotent)."""
     import sqlalchemy as sa
+    # Use plain ALTER TABLE (no IF NOT EXISTS) — SQLite doesn't support that syntax.
+    # The try/except below makes it idempotent: if the column exists, the error is swallowed.
     migrations = [
-        "ALTER TABLE scans ADD COLUMN IF NOT EXISTS ai_summary TEXT",
+        "ALTER TABLE scans ADD COLUMN ai_summary TEXT",
     ]
     with engine.connect() as conn:
         for sql in migrations:

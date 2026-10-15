@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()   # must be FIRST — loads backend/.env before any module reads os.getenv()
+
 import asyncio
 
 from fastapi import FastAPI, HTTPException, Depends
