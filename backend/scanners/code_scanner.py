@@ -17,6 +17,7 @@ Additional:
 """
 
 import ast
+import concurrent.futures
 import re
 from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
@@ -403,6 +404,235 @@ def _js_taint_analysis(
     return taint_findings
 
 
+def _scan_single_file(
+    repo,
+    file_obj,
+) -> tuple[list, dict]:
+    """
+    Scan one file from the git tree.
+
+    Runs Pass 1 (regex), Pass 2 (Presidio NER), and AST taint analysis
+    for a single file.  Called concurrently by scan_github_repo via
+    ThreadPoolExecutor.
+
+    Returns
+    -------
+    (file_findings, file_usage_map)
+    """
+    file_findings:  list = []
+    file_usage_map: dict = {}
+
+    try:
+        content = repo.get_contents(file_obj.path)
+        source_text = content.decoded_content.decode('utf-8', errors='ignore')
+        lines = source_text.splitlines()
+
+        # Module type labels for this file
+        file_module_types = classify_module(file_obj.path, source_text)
+
+        # Track pass-1/2 findings per line for taint seeding
+        line_pii: list[tuple[int, PIICategory]] = []
+
+        is_py = file_obj.path.endswith('.py')
+        is_js = file_obj.path.endswith(('.js', '.ts'))
+
+        # Docstring-tracking state (Python triple-quoted strings)
+        _in_docstring    = False
+        _docstring_delim = '"""'
+        # JS/TS block comments  /* ... */  and  /** ... */
+        _in_block_comment = False
+
+        for line_num, line in enumerate(lines, 1):
+            stripped = line.strip()
+
+            # ── Docstring skip (Python only) ──────────────────────────
+            # Triple-quoted strings are docstrings / multi-line literals.
+            # They name SDKs and PII in prose, not in executable code.
+            if is_py:
+                if _in_docstring:
+                    if _docstring_delim in stripped:
+                        _in_docstring = False
+                    continue          # always skip body lines
+                else:
+                    _hit_delim = None
+                    for _delim in ('"""', "'''"):
+                        if stripped.startswith(_delim):
+                            _hit_delim = _delim
+                            rest = stripped[3:]
+                            if _delim not in rest:
+                                # opening of a multi-line docstring
+                                _in_docstring    = True
+                                _docstring_delim = _delim
+                            break
+                    if _hit_delim is not None:
+                        continue   # skip the opening/single-line docstring
+
+            # Skip pure-comment lines (Python # and JS/TS //) ─────────
+            if is_py and stripped.startswith('#'):
+                continue
+
+            # ── JS/TS block comment skip  /* ... */  /** ... */ ───────
+            # Body lines of block comments start with ' * ', not '//',
+            # so the // check above misses them — we need state tracking.
+            if is_js:
+                if _in_block_comment:
+                    if '*/' in stripped:
+                        _in_block_comment = False
+                    continue       # skip every body line
+                else:
+                    if stripped.startswith('/*'):
+                        if '*/' not in stripped[2:]:
+                            _in_block_comment = True
+                        continue   # skip the opening line itself
+                    # Inline  /* comment */  — strip it so SDK names don't fire
+                    if '/*' in line and '*/' in line:
+                        before = line[:line.index('/*')]
+                        after  = line[line.index('*/') + 2:]
+                        line    = before + after
+                        stripped = line.strip()
+                if stripped.startswith('//'):
+                    continue   # remaining // comment after block-comment strip
+
+            # For lines with trailing inline comments, use only the code part
+            # for SDK detection so comment text doesn't trigger false SDK matches.
+            # Python inline comment: everything from the first unquoted # onward
+            # JS/TS  inline comment: everything from // onward
+            code_part = line
+            if is_py and '#' in line:
+                # Simple heuristic: take text before the first #
+                code_part = line.split('#')[0]
+            elif is_js and '//' in line:
+                code_part = line.split('//')[0]
+
+            line_lower      = line.lower()
+            code_part_lower = code_part.lower()
+            matched = False
+
+            # ── Pass 1: regex ─────────────────────────────────────────
+            for category, pattern in PII_PATTERNS.items():
+                if re.search(pattern, line_lower):
+                    # Special: validate Aadhaar digit sequences
+                    if category == PIICategory.AADHAAR:
+                        if not _validate_aadhaar(line):
+                            continue  # regex hit but Verhoeff fails — skip
+
+                    # Use code_part_lower (comment stripped) so SDK names
+                    # in comments don't trigger false third-party findings.
+                    third_party = next(
+                        (s for s in THIRD_PARTY_SDKS if s in code_part_lower),
+                        None,
+                    )
+                    # Check logger sinks (code part only)
+                    if not third_party:
+                        logger_hit = next(
+                            (s for s in LOGGER_SINK_KEYWORDS if s in code_part_lower),
+                            None,
+                        )
+                        if logger_hit:
+                            third_party = logger_hit.rstrip('.').rstrip('(')
+
+                    fo = DataFlowObject(
+                        source="code_scanner",
+                        file_path=file_obj.path,
+                        line_number=line_num,
+                        raw_text=line.strip()[:200],
+                        field_name=category.value,
+                        pii_category=category,
+                        sensitivity=SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN),
+                        third_party_sdk=third_party,
+                    )
+                    file_findings.append(fo)
+                    line_pii.append((line_num, category))
+
+                    # Update usage_map
+                    file_usage_map.setdefault(category, set()).update(file_module_types)
+
+                    matched = True
+                    break  # one finding per line in pass 1
+
+            # ── Pass 2: Presidio NER ──────────────────────────────────
+            if not matched and len(line.strip()) > 10:
+                presidio_hits = scan_text_with_presidio(line)
+                for hit in presidio_hits:
+                    if hit in PRESIDIO_MAP:
+                        cat, sens = PRESIDIO_MAP[hit]
+                        third_party = next(
+                            (s for s in THIRD_PARTY_SDKS if s in code_part_lower),
+                            None,
+                        )
+                        fo = DataFlowObject(
+                            source="presidio_scanner",
+                            file_path=file_obj.path,
+                            line_number=line_num,
+                            raw_text=line.strip()[:200],
+                            field_name=hit.lower(),
+                            pii_category=cat,
+                            sensitivity=sens,
+                            third_party_sdk=third_party,
+                        )
+                        file_findings.append(fo)
+                        line_pii.append((line_num, cat))
+                        file_usage_map.setdefault(cat, set()).update(file_module_types)
+                        break
+
+        # ── AST taint analysis ────────────────────────────────────────
+        taint_results: list[dict] = []
+        if file_obj.path.endswith('.py'):
+            taint_results = _python_taint_analysis(source_text, file_obj.path, line_pii)
+        elif file_obj.path.endswith(('.js', '.ts')):
+            taint_results = _js_taint_analysis(source_text, file_obj.path, line_pii)
+
+        # Snapshot pass-1/2 findings ONCE so taint results at the same
+        # line as each other (different PII categories) are not suppressed.
+        existing_pass12 = {(f.file_path, f.line_number) for f in file_findings}
+        existing_taint_keys: set = set()  # (file_path, line_number, pii_category)
+
+        for tr in taint_results:
+            cat = tr["pii_category"]
+            sink = tr["sink"]
+            # Determine which SDK bucket the sink falls into
+            sdk_label = next(
+                (s for s in THIRD_PARTY_SDKS if s in sink.lower()),
+                None,
+            )
+            if not sdk_label:
+                sdk_label = next(
+                    (ls.rstrip('.').rstrip('(') for ls in LOGGER_SINK_KEYWORDS if ls.replace('(', '').replace('.', '') in sink.lower()),
+                    None,
+                )
+            if not sdk_label:
+                sdk_label = sink[:40]
+
+            # Skip if pass-1/2 already caught a finding at the same line
+            line_key = (tr["file_path"], tr["line_number"])
+            if line_key in existing_pass12:
+                continue
+
+            # Skip if taint already reported the same (file, line, category)
+            cat_key = (tr["file_path"], tr["line_number"], cat)
+            if cat_key in existing_taint_keys:
+                continue
+            existing_taint_keys.add(cat_key)
+
+            fo = DataFlowObject(
+                source="taint_analysis",
+                file_path=tr["file_path"],
+                line_number=tr["line_number"],
+                raw_text=tr["raw_text"],
+                field_name=cat.value,
+                pii_category=cat,
+                sensitivity=SENSITIVITY_MAP.get(cat, Sensitivity.UNKNOWN),
+                third_party_sdk=sdk_label,
+            )
+            file_findings.append(fo)
+            file_usage_map.setdefault(cat, set()).update(file_module_types)
+
+    except Exception as e:
+        print(f"[scanner] skipped {file_obj.path}: {e}")
+
+    return file_findings, file_usage_map
+
+
 # ── Main scanner ──────────────────────────────────────────────────────────────
 
 def scan_github_repo(
@@ -435,214 +665,25 @@ def scan_github_repo(
     target_files = target_files[:300]
     print(f"[scanner] {len(target_files)} files to scan in {repo_name}")
 
-    for file_obj in target_files:
-        try:
-            content = repo.get_contents(file_obj.path)
-            source_text = content.decoded_content.decode('utf-8', errors='ignore')
-            lines = source_text.splitlines()
-
-            # Module type labels for this file
-            file_module_types = classify_module(file_obj.path, source_text)
-
-            # Track pass-1/2 findings per line for taint seeding
-            line_pii: list[tuple[int, PIICategory]] = []
-
-            is_py = file_obj.path.endswith('.py')
-            is_js = file_obj.path.endswith(('.js', '.ts'))
-
-            # Docstring-tracking state (Python triple-quoted strings)
-            _in_docstring    = False
-            _docstring_delim = '"""'
-            # JS/TS block comments  /* ... */  and  /** ... */
-            _in_block_comment = False
-
-            for line_num, line in enumerate(lines, 1):
-                stripped = line.strip()
-
-                # ── Docstring skip (Python only) ──────────────────────────
-                # Triple-quoted strings are docstrings / multi-line literals.
-                # They name SDKs and PII in prose, not in executable code.
-                if is_py:
-                    if _in_docstring:
-                        if _docstring_delim in stripped:
-                            _in_docstring = False
-                        continue          # always skip body lines
-                    else:
-                        _hit_delim = None
-                        for _delim in ('"""', "'''"):
-                            if stripped.startswith(_delim):
-                                _hit_delim = _delim
-                                rest = stripped[3:]
-                                if _delim not in rest:
-                                    # opening of a multi-line docstring
-                                    _in_docstring    = True
-                                    _docstring_delim = _delim
-                                break
-                        if _hit_delim is not None:
-                            continue   # skip the opening/single-line docstring
-
-                # Skip pure-comment lines (Python # and JS/TS //) ─────────
-                if is_py and stripped.startswith('#'):
-                    continue
-
-                # ── JS/TS block comment skip  /* ... */  /** ... */ ───────
-                # Body lines of block comments start with ' * ', not '//',
-                # so the // check above misses them — we need state tracking.
-                if is_js:
-                    if _in_block_comment:
-                        if '*/' in stripped:
-                            _in_block_comment = False
-                        continue       # skip every body line
-                    else:
-                        if stripped.startswith('/*'):
-                            if '*/' not in stripped[2:]:
-                                _in_block_comment = True
-                            continue   # skip the opening line itself
-                        # Inline  /* comment */  — strip it so SDK names don't fire
-                        if '/*' in line and '*/' in line:
-                            before = line[:line.index('/*')]
-                            after  = line[line.index('*/') + 2:]
-                            line    = before + after
-                            stripped = line.strip()
-                    if stripped.startswith('//'):
-                        continue   # remaining // comment after block-comment strip
-
-                # For lines with trailing inline comments, use only the code part
-                # for SDK detection so comment text doesn't trigger false SDK matches.
-                # Python inline comment: everything from the first unquoted # onward
-                # JS/TS  inline comment: everything from // onward
-                code_part = line
-                if is_py and '#' in line:
-                    # Simple heuristic: take text before the first #
-                    code_part = line.split('#')[0]
-                elif is_js and '//' in line:
-                    code_part = line.split('//')[0]
-
-                line_lower      = line.lower()
-                code_part_lower = code_part.lower()
-                matched = False
-
-                # ── Pass 1: regex ─────────────────────────────────────────
-                for category, pattern in PII_PATTERNS.items():
-                    if re.search(pattern, line_lower):
-                        # Special: validate Aadhaar digit sequences
-                        if category == PIICategory.AADHAAR:
-                            if not _validate_aadhaar(line):
-                                continue  # regex hit but Verhoeff fails — skip
-
-                        # Use code_part_lower (comment stripped) so SDK names
-                        # in comments don't trigger false third-party findings.
-                        third_party = next(
-                            (s for s in THIRD_PARTY_SDKS if s in code_part_lower),
-                            None,
-                        )
-                        # Check logger sinks (code part only)
-                        if not third_party:
-                            logger_hit = next(
-                                (s for s in LOGGER_SINK_KEYWORDS if s in code_part_lower),
-                                None,
-                            )
-                            if logger_hit:
-                                third_party = logger_hit.rstrip('.').rstrip('(')
-
-                        fo = DataFlowObject(
-                            source="code_scanner",
-                            file_path=file_obj.path,
-                            line_number=line_num,
-                            raw_text=line.strip()[:200],
-                            field_name=category.value,
-                            pii_category=category,
-                            sensitivity=SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN),
-                            third_party_sdk=third_party,
-                        )
-                        findings.append(fo)
-                        line_pii.append((line_num, category))
-
-                        # Update usage_map
-                        usage_map.setdefault(category, set()).update(file_module_types)
-
-                        matched = True
-                        break  # one finding per line in pass 1
-
-                # ── Pass 2: Presidio NER ──────────────────────────────────
-                if not matched and len(line.strip()) > 10:
-                    presidio_hits = scan_text_with_presidio(line)
-                    for hit in presidio_hits:
-                        if hit in PRESIDIO_MAP:
-                            cat, sens = PRESIDIO_MAP[hit]
-                            third_party = next(
-                                (s for s in THIRD_PARTY_SDKS if s in code_part_lower),
-                                None,
-                            )
-                            fo = DataFlowObject(
-                                source="presidio_scanner",
-                                file_path=file_obj.path,
-                                line_number=line_num,
-                                raw_text=line.strip()[:200],
-                                field_name=hit.lower(),
-                                pii_category=cat,
-                                sensitivity=sens,
-                                third_party_sdk=third_party,
-                            )
-                            findings.append(fo)
-                            line_pii.append((line_num, cat))
-                            usage_map.setdefault(cat, set()).update(file_module_types)
-                            break
-
-            # ── AST taint analysis ────────────────────────────────────────
-            taint_results: list[dict] = []
-            if file_obj.path.endswith('.py'):
-                taint_results = _python_taint_analysis(source_text, file_obj.path, line_pii)
-            elif file_obj.path.endswith(('.js', '.ts')):
-                taint_results = _js_taint_analysis(source_text, file_obj.path, line_pii)
-
-            # Snapshot pass-1/2 findings ONCE so taint results at the same
-            # line as each other (different PII categories) are not suppressed.
-            existing_pass12 = {(f.file_path, f.line_number) for f in findings}
-            existing_taint_keys: set = set()  # (file_path, line_number, pii_category)
-
-            for tr in taint_results:
-                cat = tr["pii_category"]
-                sink = tr["sink"]
-                # Determine which SDK bucket the sink falls into
-                sdk_label = next(
-                    (s for s in THIRD_PARTY_SDKS if s in sink.lower()),
-                    None,
-                )
-                if not sdk_label:
-                    sdk_label = next(
-                        (ls.rstrip('.').rstrip('(') for ls in LOGGER_SINK_KEYWORDS if ls.replace('(', '').replace('.', '') in sink.lower()),
-                        None,
-                    )
-                if not sdk_label:
-                    sdk_label = sink[:40]
-
-                # Skip if pass-1/2 already caught a finding at the same line
-                line_key = (tr["file_path"], tr["line_number"])
-                if line_key in existing_pass12:
-                    continue
-
-                # Skip if taint already reported the same (file, line, category)
-                cat_key = (tr["file_path"], tr["line_number"], cat)
-                if cat_key in existing_taint_keys:
-                    continue
-                existing_taint_keys.add(cat_key)
-
-                fo = DataFlowObject(
-                    source="taint_analysis",
-                    file_path=tr["file_path"],
-                    line_number=tr["line_number"],
-                    raw_text=tr["raw_text"],
-                    field_name=cat.value,
-                    pii_category=cat,
-                    sensitivity=SENSITIVITY_MAP.get(cat, Sensitivity.UNKNOWN),
-                    third_party_sdk=sdk_label,
-                )
-                findings.append(fo)
-                usage_map.setdefault(cat, set()).update(file_module_types)
-
-        except Exception as e:
-            print(f"[scanner] skipped {file_obj.path}: {e}")
+    # ── Parallel file scanning via ThreadPoolExecutor ─────────────────────
+    # Each file is fetched from GitHub (I/O-bound) and scanned (CPU-bound)
+    # concurrently.  PyGitHub is blocking/thread-safe for reads, so
+    # ThreadPoolExecutor is the right primitive (no native async support).
+    max_workers = min(20, len(target_files) or 1)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_file = {
+            pool.submit(_scan_single_file, repo, f): f
+            for f in target_files
+        }
+        for future in concurrent.futures.as_completed(future_to_file):
+            file_obj = future_to_file[future]
+            try:
+                file_findings, file_usage_map = future.result()
+                findings.extend(file_findings)
+                for cat, mods in file_usage_map.items():
+                    usage_map.setdefault(cat, set()).update(mods)
+            except Exception as exc:
+                print(f"[scanner] skipped {file_obj.path}: {exc}")
 
     print(f"[scanner] Done — {len(findings)} PII findings")
     print(f"[scanner] usage_map: { {k.value: v for k, v in usage_map.items()} }")

@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -52,7 +54,7 @@ def health():
 
 
 @app.post("/scan")
-def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
+async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
 
     # Security: never log the GitHub token
     print(f"[scan] Starting scan — repo: {req.github_repo_url}")
@@ -70,16 +72,20 @@ def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
     print(f"[scan] Scan {scan_id} created with status=running")
 
     try:
-        # ── Step 1: Scan source code ──────────────────────────────────────
-        # Returns (findings, usage_map) after Step 4 additions
-        code_findings, usage_map = scan_github_repo(
-            req.github_repo_url, req.github_token
-        )
-
-        # ── Step 2: Parse privacy policy ─────────────────────────────────
-        # Returns (policy_claims, purpose_map, vagueness_warnings) after Step 3
-        policy_claims, purpose_map, vagueness_warnings = parse_privacy_policy(
-            req.privacy_policy_url
+        # ── Steps 1 + 2: Concurrent I/O — code scan and policy fetch ──────
+        # scan_github_repo  (GitHub API + regex/NER + AST) and
+        # parse_privacy_policy (HTTP fetch + regex) are independent I/O-bound
+        # operations.  asyncio.gather runs them concurrently; each is wrapped
+        # in asyncio.to_thread so the synchronous/blocking libraries
+        # (PyGitHub, requests) don't block the event loop.
+        (
+            (code_findings, usage_map),
+            (policy_claims, purpose_map, vagueness_warnings),
+        ) = await asyncio.gather(
+            asyncio.to_thread(scan_github_repo,
+                              req.github_repo_url, req.github_token),
+            asyncio.to_thread(parse_privacy_policy,
+                              req.privacy_policy_url),
         )
 
         # ── Step 3: Detect notice gaps ────────────────────────────────────
