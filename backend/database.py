@@ -29,6 +29,8 @@ class Scan(Base):
     
 
     findings   = relationship("Finding",   back_populates="scan")
+    ai_summary = Column(Text, nullable=True)   # cached LLM executive summary
+
     violations = relationship("Violation", back_populates="scan")
 
 
@@ -65,8 +67,48 @@ class Violation(Base):
     scan = relationship("Scan", back_populates="violations")
 
 
+
+# ── Chat tables (LLM compliance chatbot) ─────────────────────────────────────
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    scan_id    = Column(Integer, ForeignKey("scans.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    messages = relationship("ChatMessage", back_populates="session",
+                            order_by="ChatMessage.id")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("chat_sessions.id"), nullable=False)
+    role       = Column(String, nullable=False)   # 'user' | 'assistant'
+    content    = Column(Text,   nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("ChatSession", back_populates="messages")
+
+
 def create_tables():
     Base.metadata.create_all(bind=engine)
+
+def migrate_tables():
+    """Apply additive schema migrations to existing tables (idempotent)."""
+    import sqlalchemy as sa
+    migrations = [
+        "ALTER TABLE scans ADD COLUMN IF NOT EXISTS ai_summary TEXT",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(sa.text(sql))
+                conn.commit()
+            except Exception as e:
+                print(f"[db] migration skipped: {e}")
 
 
 def get_db():

@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 from scanners.code_scanner import scan_github_repo
 from scanners.policy_parser import parse_privacy_policy
 from dpdp.rule_engine import run_dpdp_rules
-from database import create_tables, get_db, Scan, Finding, Violation
+from database import (create_tables, migrate_tables, get_db,
+                       Scan, Finding, Violation, ChatSession, ChatMessage)
 from scoring import calculate_compliance_score
 from report_generator import generate_report_html
 from models.dataflow import PIICategory
+from llm_client import generate_report_summary, chat_completion, LLMNotConfiguredError
 
 app = FastAPI(title="PrivacyPilot API", version="0.1.0")
 
@@ -27,6 +29,7 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     create_tables()
+    migrate_tables()
     print("[db] Tables ready")
 
 
@@ -256,3 +259,214 @@ def get_report(
             raise HTTPException(status_code=500, detail=f"PDF error: {e}")
 
     return HTMLResponse(content=html)
+
+
+# ── LLM Report Summary ────────────────────────────────────────────────────────
+
+@app.get("/scans/{scan_id}/summary")
+def get_scan_summary(scan_id: int, db: Session = Depends(get_db)):
+    """Return (or lazily generate) an LLM executive summary for a scan."""
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    # Return cached summary if available
+    if scan.ai_summary:
+        return {"scan_id": scan_id, "summary": scan.ai_summary, "cached": True}
+
+    # Build a minimal scan_data dict from DB rows
+    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
+    findings   = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+
+    from scoring import calculate_compliance_score
+    class _FakeV:
+        def __init__(self, s): self.severity = s
+
+    compliance = calculate_compliance_score(
+        [_FakeV(v.severity) for v in violations],
+        scan.findings_count or 0,
+        scan.gaps_count or 0,
+    )
+
+    scan_data = {
+        "scan_id":              scan_id,
+        "repo_url":             scan.repo_url,
+        "policy_url":           scan.policy_url,
+        "code_findings_count":  scan.findings_count or 0,
+        "gaps_detected":        list({f.pii_category for f in findings if f.is_gap}),
+        "compliance":           compliance,
+        "violations":           [
+            {
+                "dpdp_section":  v.dpdp_section,
+                "section_title": v.section_title,
+                "severity":      v.severity,
+                "pii_category":  v.pii_category,
+                "evidence":      v.evidence,
+                "recommendation":v.recommendation,
+            }
+            for v in violations
+        ],
+        "sample_findings": [
+            {
+                "pii_category": f.pii_category,
+                "file_path":    f.file_path,
+                "line_number":  f.line_number,
+                "source":       f.source,
+            }
+            for f in findings[:10]
+        ],
+    }
+
+    try:
+        summary = generate_report_summary(scan_data)
+    except LLMNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+
+    # Cache in DB
+    scan.ai_summary = summary
+    db.commit()
+    return {"scan_id": scan_id, "summary": summary, "cached": False}
+
+
+# ── Compliance Chatbot ────────────────────────────────────────────────────────
+
+class ChatMessageRequest(BaseModel):
+    content: str
+
+
+@app.post("/chat/sessions")
+def create_chat_session(scan_id: int, db: Session = Depends(get_db)):
+    """Create a new chat session bound to a specific scan."""
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    session = ChatSession(scan_id=scan_id)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return {"session_id": session.id, "scan_id": scan_id}
+
+
+@app.post("/chat/sessions/{session_id}/message")
+def send_chat_message(
+    session_id: int,
+    req: ChatMessageRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Send a user message and receive an LLM compliance advisor response.
+
+    The full conversation history is sent to the LLM on each turn, providing
+    session-persistent, context-aware dialogue (not just one-shot Q&A).
+    """
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    # Persist the user message
+    user_msg = ChatMessage(session_id=session_id, role="user", content=req.content)
+    db.add(user_msg)
+    db.commit()
+
+    # Build the full conversation history for the LLM
+    history = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.id).all()
+
+    messages = [{"role": m.role, "content": m.content} for m in history]
+
+    # Reconstruct scan_data context from DB
+    scan = session.scan if hasattr(session, "scan") else            db.query(Scan).filter(Scan.id == session.scan_id).first()
+    violations = db.query(Violation).filter(Violation.scan_id == scan.id).all()
+    findings   = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+
+    from scoring import calculate_compliance_score
+    class _FakeV:
+        def __init__(self, s): self.severity = s
+
+    compliance = calculate_compliance_score(
+        [_FakeV(v.severity) for v in violations],
+        scan.findings_count or 0,
+        scan.gaps_count or 0,
+    )
+
+    scan_data = {
+        "scan_id":             scan.id,
+        "repo_url":            scan.repo_url,
+        "policy_url":          scan.policy_url,
+        "code_findings_count": scan.findings_count or 0,
+        "gaps_detected":       list({f.pii_category for f in findings if f.is_gap}),
+        "compliance":          compliance,
+        "violations": [
+            {
+                "dpdp_section":  v.dpdp_section,
+                "section_title": v.section_title,
+                "severity":      v.severity,
+                "pii_category":  v.pii_category,
+                "evidence":      v.evidence,
+                "recommendation":v.recommendation,
+            }
+            for v in violations
+        ],
+        "sample_findings": [
+            {
+                "pii_category": f.pii_category,
+                "file_path":    f.file_path,
+                "line_number":  f.line_number,
+                "source":       f.source,
+            }
+            for f in findings[:10]
+        ],
+    }
+
+    try:
+        reply = chat_completion(messages, scan_data)
+    except LLMNotConfiguredError as e:
+        reply = (
+            "⚠️ The AI advisor is not configured. "
+            "Please set GEMINI_API_KEY or ANTHROPIC_API_KEY in the server environment."
+        )
+    except Exception as e:
+        reply = f"⚠️ LLM error: {e}"
+
+    # Persist assistant reply
+    assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=reply)
+    db.add(assistant_msg)
+    db.commit()
+
+    return {
+        "session_id":   session_id,
+        "role":         "assistant",
+        "content":      reply,
+        "message_count": len(history) + 1,
+    }
+
+
+@app.get("/chat/sessions/{session_id}/history")
+def get_chat_history(session_id: int, db: Session = Depends(get_db)):
+    """Return the full message history for a chat session."""
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    messages = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.id).all()
+
+    return {
+        "session_id": session_id,
+        "scan_id":    session.scan_id,
+        "messages":   [
+            {
+                "id":         m.id,
+                "role":       m.role,
+                "content":    m.content,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in messages
+        ],
+    }
+

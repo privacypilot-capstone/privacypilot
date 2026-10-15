@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 const STYLE = {
   page:  { padding: '2rem', fontFamily: 'sans-serif', maxWidth: '860px', margin: '0 auto' },
@@ -14,6 +14,54 @@ const STYLE = {
   chip:  { display: 'inline-flex', alignItems: 'center',
            background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '99px',
            padding: '4px 14px', fontFamily: 'monospace', fontSize: '13px', fontWeight: '600' },
+  // ── Chat panel ─────────────────────────────────────────────────────────
+  chatBtn: {
+    position: 'fixed', bottom: '28px', right: '28px', width: '56px', height: '56px',
+    borderRadius: '50%', background: '#1a1a2e', color: '#fff', border: 'none',
+    fontSize: '24px', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.25)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+  },
+  chatPanel: {
+    position: 'fixed', bottom: '96px', right: '28px', width: '380px',
+    height: '500px', background: '#fff', borderRadius: '14px',
+    boxShadow: '0 8px 40px rgba(0,0,0,0.18)', display: 'flex', flexDirection: 'column',
+    zIndex: 1000, border: '1px solid #dee2e6', overflow: 'hidden',
+  },
+  chatHeader: {
+    background: '#1a1a2e', color: '#fff', padding: '12px 16px',
+    fontWeight: 'bold', fontSize: '14px', display: 'flex',
+    justifyContent: 'space-between', alignItems: 'center',
+  },
+  chatBody: {
+    flex: 1, overflowY: 'auto', padding: '12px 14px',
+    display: 'flex', flexDirection: 'column', gap: '10px',
+  },
+  chatInputRow: {
+    display: 'flex', gap: '8px', padding: '10px 12px',
+    borderTop: '1px solid #dee2e6', background: '#f8f9fa',
+  },
+  chatInput: {
+    flex: 1, padding: '8px 12px', borderRadius: '20px',
+    border: '1px solid #ccc', fontSize: '13px', outline: 'none',
+  },
+  chatSend: {
+    padding: '8px 16px', borderRadius: '20px', background: '#1a1a2e',
+    color: '#fff', border: 'none', cursor: 'pointer', fontSize: '13px',
+  },
+  bubbleUser: {
+    alignSelf: 'flex-end', background: '#1a1a2e', color: '#fff',
+    borderRadius: '16px 16px 4px 16px', padding: '8px 14px',
+    fontSize: '13px', maxWidth: '80%', lineHeight: 1.5,
+  },
+  bubbleBot: {
+    alignSelf: 'flex-start', background: '#f0f4ff', color: '#111',
+    borderRadius: '16px 16px 16px 4px', padding: '8px 14px',
+    fontSize: '13px', maxWidth: '85%', lineHeight: 1.5, whiteSpace: 'pre-wrap',
+  },
+  bubbleTyping: {
+    alignSelf: 'flex-start', background: '#f0f4ff', color: '#888',
+    borderRadius: '16px', padding: '8px 14px', fontSize: '13px',
+  },
   stat:  { display: 'inline-block', background: '#1a1a2e', color: '#fff',
            borderRadius: '6px', padding: '8px 20px', margin: '4px 8px 4px 0',
            fontWeight: 'bold', fontSize: '1.1rem' },
@@ -32,6 +80,61 @@ export default function App() {
   const [result,  setResult]  = useState(null)
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState(null)
+
+  // ── Chat state ─────────────────────────────────────────────────────────
+  const [chatOpen,    setChatOpen]    = useState(false)
+  const [sessionId,   setSessionId]   = useState(null)
+  const [chatMsgs,    setChatMsgs]    = useState([])
+  const [chatInput,   setChatInput]   = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [aiSummary,   setAiSummary]   = useState(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const chatBodyRef = useRef(null)
+
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    if (chatBodyRef.current) {
+      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight
+    }
+  }, [chatMsgs, chatLoading])
+
+  // When a scan completes: fetch AI summary and create a chat session
+  useEffect(() => {
+    if (!result?.scan_id) return
+    // Fetch AI summary
+    setSummaryLoading(true)
+    fetch(`http://localhost:8000/scans/${result.scan_id}/summary`)
+      .then(r => r.json())
+      .then(d => setAiSummary(d.summary))
+      .catch(() => setAiSummary(null))
+      .finally(() => setSummaryLoading(false))
+    // Create chat session
+    fetch(`http://localhost:8000/chat/sessions?scan_id=${result.scan_id}`, { method: 'POST' })
+      .then(r => r.json())
+      .then(d => setSessionId(d.session_id))
+      .catch(() => {})
+  }, [result?.scan_id])
+
+  const sendChatMessage = async () => {
+    const text = chatInput.trim()
+    if (!text || !sessionId || chatLoading) return
+    setChatInput('')
+    setChatMsgs(m => [...m, { role: 'user', content: text }])
+    setChatLoading(true)
+    try {
+      const res = await fetch(`http://localhost:8000/chat/sessions/${sessionId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text }),
+      })
+      const data = await res.json()
+      setChatMsgs(m => [...m, { role: 'assistant', content: data.content }])
+    } catch {
+      setChatMsgs(m => [...m, { role: 'assistant', content: '⚠️ Connection error. Please try again.' }])
+    } finally {
+      setChatLoading(false)
+    }
+  }
 
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
@@ -244,7 +347,109 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* ── AI Executive Summary ────────────────────────────────────── */}
+        {(summaryLoading || aiSummary) && (
+          <div style={{
+            marginTop: '1.5rem', background: '#fff', border: '1px solid #dee2e6',
+            borderRadius: '10px', overflow: 'hidden',
+          }}>
+            <div style={{
+              background: 'linear-gradient(135deg, #1a1a2e, #16213e)',
+              padding: '12px 18px', display: 'flex', alignItems: 'center', gap: '10px',
+            }}>
+              <span style={{ fontSize: '18px' }}>🤖</span>
+              <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '15px' }}>
+                AI Compliance Summary
+              </span>
+              <span style={{
+                marginLeft: 'auto', background: 'rgba(255,255,255,0.15)',
+                color: '#ccc', fontSize: '11px', padding: '2px 8px', borderRadius: '99px',
+              }}>Powered by Gemini</span>
+            </div>
+            <div style={{ padding: '1rem 1.2rem', fontSize: '14px', lineHeight: 1.7, color: '#333' }}>
+              {summaryLoading
+                ? <span style={{ color: '#888' }}>⏳ Generating executive summary…</span>
+                : <span style={{ whiteSpace: 'pre-wrap' }}>{aiSummary}</span>
+              }
+            </div>
+          </div>
+        )}
       </div>
-    </>
+
+    {/* ── Floating chat button ────────────────────────────────────────── */}
+    {result?.scan_id && (
+      <>
+        <button
+          style={{
+            ...STYLE.chatBtn,
+            background: chatOpen ? '#dc3545' : '#1a1a2e',
+          }}
+          onClick={() => setChatOpen(o => !o)}
+          title="Ask the DPDP compliance advisor"
+        >
+          {chatOpen ? '✕' : '💬'}
+        </button>
+
+        {chatOpen && (
+          <div style={STYLE.chatPanel}>
+            {/* Header */}
+            <div style={STYLE.chatHeader}>
+              <span>🛡️ DPDP Compliance Advisor</span>
+              <span style={{ fontSize: '11px', color: '#aaa' }}>
+                Scan #{result.scan_id}
+              </span>
+            </div>
+
+            {/* Messages */}
+            <div style={STYLE.chatBody} ref={chatBodyRef}>
+              {chatMsgs.length === 0 && (
+                <div style={{ color: '#888', fontSize: '13px', textAlign: 'center', marginTop: '2rem' }}>
+                  <div style={{ fontSize: '28px', marginBottom: '8px' }}>🔍</div>
+                  Ask me anything about your compliance scan.<br />
+                  <span style={{ fontSize: '12px' }}>
+                    e.g. "Which violation should I fix first?" or<br />
+                    "What does Section 8(2) require?"
+                  </span>
+                </div>
+              )}
+
+              {chatMsgs.map((m, i) => (
+                <div key={i} style={m.role === 'user' ? STYLE.bubbleUser : STYLE.bubbleBot}>
+                  {m.content}
+                </div>
+              ))}
+
+              {chatLoading && (
+                <div style={STYLE.bubbleTyping}>
+                  <span>⏳ Thinking…</span>
+                </div>
+              )}
+            </div>
+
+            {/* Input */}
+            <div style={STYLE.chatInputRow}>
+              <input
+                style={STYLE.chatInput}
+                placeholder="Ask a compliance question…"
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendChatMessage()}
+                disabled={chatLoading || !sessionId}
+              />
+              <button
+                style={{
+                  ...STYLE.chatSend,
+                  opacity: (chatLoading || !sessionId) ? 0.5 : 1,
+                }}
+                onClick={sendChatMessage}
+                disabled={chatLoading || !sessionId}
+              >Send</button>
+            </div>
+          </div>
+        )}
+      </>
+    )}
+  </>
   )
 }
