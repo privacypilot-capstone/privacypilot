@@ -47,7 +47,18 @@ def calculate_compliance_score(
         * (1 - PENALTY_HIGH) ** high_count
         * (1 - PENALTY_MEDIUM) ** medium_count
     )
-    score = round(score, 1)
+    # Round for display, but not to 1 decimal place: the true value is
+    # never exactly 0, yet round(x, 1) collapses anything below 0.05 to a
+    # literal 0.0 — reintroducing the "repos become indistinguishable"
+    # problem this formula was built to avoid, just via rounding instead
+    # of the old hard floor. 4 decimal places pushes that collapse point
+    # from ~35 critical violations out to ~65, comfortably past anything
+    # a single repo in this evaluation's scale would realistically produce.
+    # (At a large enough violation count any finite decimal rounding will
+    # still eventually display 0.0 — that's an inherent property of
+    # rounding a number that only asymptotically approaches zero, not a
+    # logic bug — but 4 decimals keeps it out of reach for realistic use.)
+    score = round(score, 4)
 
     # Determine rating band from score thresholds...
     if score >= 80:
