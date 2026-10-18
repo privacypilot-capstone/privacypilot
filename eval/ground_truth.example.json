@@ -1,0 +1,45 @@
+{
+  "_readme": "Copy this file to eval/ground_truth.json and replace with the real planted violations for your 5 synthetic/demo repos. 'label' must exactly match the 'label' field you used in eval/repos.json. 'rule' must be one of: rule_1_notice_gap, rule_2_third_party, rule_3_purpose_linkage, vagueness (see SECTION_TO_RULE in compute_metrics.py). 'pii_category' must be one of the real PIICategory enum values from backend/models/dataflow.py: aadhaar, pan, phone, email, location, health, financial, name, date_of_birth, biometric, unknown.",
+  "repos": [
+    {
+      "label": "fintech_demo",
+      "violations": [
+        {"rule": "rule_1_notice_gap",      "pii_category": "pan",      "note": "PAN collected in code, never mentioned in the privacy policy at all"},
+        {"rule": "rule_2_third_party",     "pii_category": "phone",   "note": "phone number sent to an undisclosed SDK/HTTP sink"},
+        {"rule": "rule_3_purpose_linkage", "pii_category": "email",   "note": "email collected but no purpose clause links it to any processing activity"}
+      ]
+    },
+    {
+      "label": "healthtech_demo",
+      "violations": [
+        {"rule": "rule_1_notice_gap",      "pii_category": "health",    "note": "replace with the actual planted violation for this repo"},
+        {"rule": "rule_2_third_party",     "pii_category": "aadhaar",   "note": "replace with the actual planted violation for this repo"},
+        {"rule": "vagueness",              "pii_category": "name",      "note": "replace with the actual planted violation for this repo"}
+      ]
+    },
+    {
+      "label": "edtech_demo",
+      "violations": [
+        {"rule": "rule_1_notice_gap",      "pii_category": "date_of_birth", "note": "replace with the actual planted violation for this repo"},
+        {"rule": "rule_3_purpose_linkage", "pii_category": "location",      "note": "replace with the actual planted violation for this repo"},
+        {"rule": "rule_2_third_party",     "pii_category": "email",         "note": "replace with the actual planted violation for this repo"}
+      ]
+    },
+    {
+      "label": "ecommerce_demo",
+      "violations": [
+        {"rule": "rule_1_notice_gap",      "pii_category": "financial", "note": "replace with the actual planted violation for this repo"},
+        {"rule": "rule_2_third_party",     "pii_category": "phone",     "note": "replace with the actual planted violation for this repo"},
+        {"rule": "vagueness",              "pii_category": "email",     "note": "replace with the actual planted violation for this repo"}
+      ]
+    },
+    {
+      "label": "govtech_demo",
+      "violations": [
+        {"rule": "rule_1_notice_gap",      "pii_category": "aadhaar",   "note": "replace with the actual planted violation for this repo"},
+        {"rule": "rule_3_purpose_linkage", "pii_category": "biometric", "note": "replace with the actual planted violation for this repo"},
+        {"rule": "rule_2_third_party",     "pii_category": "name",      "note": "replace with the actual planted violation for this repo"}
+      ]
+    }
+  ]
+}

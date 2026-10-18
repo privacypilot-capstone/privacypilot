@@ -1,0 +1,32 @@
+[
+  {
+    "label": "fintech_demo",
+    "repo_url": "https://github.com/<user>/<fintech-demo-repo>",
+    "policy_url": "https://raw.githubusercontent.com/<user>/<fintech-demo-repo>/main/PRIVACY_POLICY.md",
+    "github_token": null
+  },
+  {
+    "label": "healthtech_demo",
+    "repo_url": "https://github.com/<user>/<healthtech-demo-repo>",
+    "policy_url": "https://raw.githubusercontent.com/<user>/<healthtech-demo-repo>/main/PRIVACY_POLICY.md",
+    "github_token": null
+  },
+  {
+    "label": "edtech_demo",
+    "repo_url": "https://github.com/<user>/<edtech-demo-repo>",
+    "policy_url": "https://raw.githubusercontent.com/<user>/<edtech-demo-repo>/main/PRIVACY_POLICY.md",
+    "github_token": null
+  },
+  {
+    "label": "ecommerce_demo",
+    "repo_url": "https://github.com/<user>/<ecommerce-demo-repo>",
+    "policy_url": "https://raw.githubusercontent.com/<user>/<ecommerce-demo-repo>/main/PRIVACY_POLICY.md",
+    "github_token": null
+  },
+  {
+    "label": "govtech_demo",
+    "repo_url": "https://github.com/<user>/<govtech-demo-repo>",
+    "policy_url": "https://raw.githubusercontent.com/<user>/<govtech-demo-repo>/main/PRIVACY_POLICY.md",
+    "github_token": null
+  }
+]
