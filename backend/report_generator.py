@@ -1,7 +1,7 @@
 from datetime import datetime
 
 
-def generate_report_html(scan, violations, findings, compliance) -> str:
+def generate_report_html(scan, violations, findings, compliance, narrative: str | None = None) -> str:
     """
     Generate a full HTML compliance report for a scan.
     Returns HTML string ready for PDF conversion.
@@ -57,6 +57,21 @@ def generate_report_html(scan, violations, findings, compliance) -> str:
         "".join(f'<span class="gap-tag">{c}</span>' for c in _gap_cats)
         if _gap_cats else '<p style="color:#888">No gaps detected.</p>'
     )
+
+    # ── Narrative (LLM executive summary) ──────────────────────────────────
+    if narrative:
+        # Convert **bold** markdown to <strong> and split paragraphs
+        def _md_to_html(text):
+            text = __import__('re').sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+            paras = [p.strip() for p in text.split('\n\n') if p.strip()]
+            return '\n'.join(f'<p>{p}</p>' for p in paras)
+        narrative_html = f'''
+        <div class="narrative">
+          <h3>&#x1F4CA; AI-Generated Executive Summary</h3>
+          {_md_to_html(narrative)}
+        </div>'''
+    else:
+        narrative_html = ''
 
     html = f"""
 <!DOCTYPE html>
@@ -117,6 +132,18 @@ def generate_report_html(scan, violations, findings, compliance) -> str:
   .violation-body {{ padding: 12px 14px; }}
   .violation-body p {{ margin: 4px 0; font-size: 12px; }}
   .fix {{ color: #2d6a4f !important; }}
+  .narrative {{
+    background: #f0f4ff; border-left: 4px solid #1a1a2e;
+    border-radius: 6px; padding: 16px 20px;
+    margin-bottom: 24px; font-size: 12px; line-height: 1.7;
+    color: #222;
+  }}
+  .narrative h3 {{
+    margin: 0 0 10px; font-size: 14px; color: #1a1a2e;
+    letter-spacing: 0.3px;
+  }}
+  .narrative p {{ margin: 8px 0; }}
+  .narrative strong {{ color: #1a1a2e; }}
   .gap-tag {{
     display: inline-block; background: #fff3cd;
     border: 1px solid #ffc107; border-radius: 4px;
@@ -155,6 +182,8 @@ def generate_report_html(scan, violations, findings, compliance) -> str:
     <div class="score-label">{rating} Compliance</div>
     <div class="score-sub">{critical} critical · {high} high severity violations</div>
   </div>
+
+  {narrative_html}
 
   <!-- Scan Info -->
   <div class="section-title">Scan Summary</div>

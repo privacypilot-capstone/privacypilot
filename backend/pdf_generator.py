@@ -5,8 +5,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 import io
+import re
 
-def generate_pdf(scan, violations, findings, compliance) -> bytes:
+def generate_pdf(scan, violations, findings, compliance, narrative: str | None = None) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4,
         topMargin=15*mm, bottomMargin=15*mm,
@@ -89,7 +90,45 @@ def generate_pdf(scan, violations, findings, compliance) -> bytes:
     story.append(score_table)
     story.append(Spacer(1, 6*mm))
 
-    # ── Scan Summary ──────────────────────────────────────────────────────────
+    # ── AI Executive Summary (narrative) ────────────────────────────────────
+    if narrative:
+        story.append(Paragraph('AI-Generated Executive Summary', h2_style))
+        story.append(HRFlowable(width=W, thickness=1, color=NAVY))
+        story.append(Spacer(1, 2*mm))
+
+        narrative_style = ParagraphStyle(
+            'narr', fontSize=9, textColor=black,
+            fontName='Helvetica', spaceAfter=6, leading=14,
+            leftIndent=4, borderPad=8,
+        )
+        narrative_bg_style = ParagraphStyle(
+            'narrh', fontSize=10, textColor=NAVY,
+            fontName='Helvetica-Bold', spaceAfter=4,
+        )
+
+        # Convert **bold** markdown to <b> tags (ReportLab supports <b>)
+        def _md_to_pdf(text):
+            return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+
+        # Wrap in a light-blue background table
+        paras = [p.strip() for p in narrative.split('\n\n') if p.strip()]
+        narr_content = '<br/><br/>'.join(_md_to_pdf(p) for p in paras)
+        narr_table = Table(
+            [[Paragraph(narr_content, narrative_style)]],
+            colWidths=[W]
+        )
+        narr_table.setStyle(TableStyle([
+            ('BACKGROUND',    (0,0), (-1,-1), HexColor('#f0f4ff')),
+            ('LEFTPADDING',   (0,0), (-1,-1), 10),
+            ('RIGHTPADDING',  (0,0), (-1,-1), 10),
+            ('TOPPADDING',    (0,0), (-1,-1), 8),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('BOX',           (0,0), (-1,-1), 1.5, NAVY),
+        ]))
+        story.append(narr_table)
+        story.append(Spacer(1, 6*mm))
+
+        # ── Scan Summary ──────────────────────────────────────────────────────────
     story.append(Paragraph('Scan Summary', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     summary_data = [

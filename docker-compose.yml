@@ -1,12 +1,19 @@
 services:
   backend:
     build: ./backend
+    command: >
+      sh -c "pip install -r requirements.txt --break-system-packages -q &&
+             uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
     ports:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://pilot:pilot@db:5432/privacypilot
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./backend:/app
 
@@ -18,8 +25,35 @@ services:
       POSTGRES_DB: privacypilot
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pilot -d privacypilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: ./backend
+    command: >
+      sh -c "pip install -r requirements.txt --break-system-packages -q &&
+             celery -A tasks worker --loglevel=info --concurrency=4"
+    environment:
+      - DATABASE_URL=postgresql://pilot:pilot@db:5432/privacypilot
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app

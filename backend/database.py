@@ -27,6 +27,7 @@ class Scan(Base):
     repo_url     = Column(String, nullable=False)
     policy_url   = Column(String, nullable=False)
     status = Column(String, default="running")
+    error_message = Column(Text, nullable=True)   # populated when status == "failed"
     created_at   = Column(DateTime, default=datetime.utcnow)
     findings_count   = Column(Integer, default=0)
     policy_count     = Column(Integer, default=0)
@@ -109,6 +110,7 @@ def migrate_tables():
     # The try/except below makes it idempotent: if the column exists, the error is swallowed.
     migrations = [
         "ALTER TABLE scans ADD COLUMN ai_summary TEXT",
+        "ALTER TABLE scans ADD COLUMN error_message TEXT",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -116,6 +118,15 @@ def migrate_tables():
                 conn.execute(sa.text(sql))
                 conn.commit()
             except Exception as e:
+                # On Postgres, a failed statement (e.g. "column already
+                # exists") leaves the connection's transaction in an
+                # aborted state — every subsequent statement on this same
+                # connection fails too ("current transaction is aborted")
+                # until it's explicitly rolled back. Without this, the
+                # FIRST already-applied migration in the list silently
+                # poisons every migration listed after it, regardless of
+                # whether they themselves would have succeeded.
+                conn.rollback()
                 print(f"[db] migration skipped: {e}")
 
 

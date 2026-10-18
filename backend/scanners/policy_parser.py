@@ -87,6 +87,8 @@ COLLECTION_CONTEXT = [
     'retain', 'record', 'access', 'handle',
 ]
 
+# ── Sentence-level PII map (requires collection-context verb in same sentence) ──
+# Kept broad — collection verb acts as the precision gate.
 POLICY_PII_MAP = {
     'name':       PIICategory.NAME,
     'email':      PIICategory.EMAIL,
@@ -108,6 +110,109 @@ POLICY_PII_MAP = {
     'identity':   PIICategory.NAME,
     'personal':   PIICategory.NAME,
 }
+
+# ── Bullet-specific PII map: precise multi-word phrases, longest-first ────────
+# Used by Pass 1b WITHOUT a collection-verb gate.  Longer phrases must appear
+# before any prefix of themselves so the longest match wins first.
+# Ambiguous single words ('name', 'pan', 'personal', etc.) are intentionally
+# absent — they need verb context and live in POLICY_PII_MAP instead.
+BULLET_PII_MAP: list[tuple[str, "PIICategory"]] = [
+    # Aadhaar
+    ("aadhaar number",          PIICategory.AADHAAR),
+    ("aadhaar card",            PIICategory.AADHAAR),
+    ("aadhar number",           PIICategory.AADHAAR),
+    ("aadhar card",             PIICategory.AADHAAR),
+    ("aadhaar",                 PIICategory.AADHAAR),
+    ("aadhar",                  PIICategory.AADHAAR),
+    # PAN — require phrase to avoid matching "japan", "pandora", etc.
+    ("permanent account number",PIICategory.PAN),
+    ("pan card",                PIICategory.PAN),
+    ("pan number",              PIICategory.PAN),
+    # Phone — specific phrases + standalone safe words
+    ("contact number",          PIICategory.PHONE),
+    ("phone number",            PIICategory.PHONE),
+    ("mobile number",           PIICategory.PHONE),
+    ("telephone number",        PIICategory.PHONE),
+    ("phone",                   PIICategory.PHONE),
+    ("mobile",                  PIICategory.PHONE),
+    # Email
+    ("email address",           PIICategory.EMAIL),
+    ("email id",                PIICategory.EMAIL),
+    ("email",                   PIICategory.EMAIL),
+    # Location — specific address types before bare "address"
+    ("home address",            PIICategory.LOCATION),
+    ("mailing address",         PIICategory.LOCATION),
+    ("residential address",     PIICategory.LOCATION),
+    ("postal address",          PIICategory.LOCATION),
+    ("billing address",         PIICategory.LOCATION),
+    ("shipping address",        PIICategory.LOCATION),
+    ("ip address",              PIICategory.LOCATION),
+    ("gps location",            PIICategory.LOCATION),
+    ("geo location",            PIICategory.LOCATION),
+    ("geolocation",             PIICategory.LOCATION),
+    ("location",                PIICategory.LOCATION),
+    ("address",                 PIICategory.LOCATION),
+    # Health
+    ("health information",      PIICategory.HEALTH),
+    ("medical information",     PIICategory.HEALTH),
+    ("medical records",         PIICategory.HEALTH),
+    ("medical record",          PIICategory.HEALTH),
+    ("health records",          PIICategory.HEALTH),
+    ("blood group",             PIICategory.HEALTH),
+    ("blood type",              PIICategory.HEALTH),
+    ("diagnosis",               PIICategory.HEALTH),
+    ("prescription",            PIICategory.HEALTH),
+    ("health",                  PIICategory.HEALTH),
+    ("medical",                 PIICategory.HEALTH),
+    # Financial
+    ("financial information",   PIICategory.FINANCIAL),
+    ("payment information",     PIICategory.FINANCIAL),
+    ("credit card",             PIICategory.FINANCIAL),
+    ("debit card",              PIICategory.FINANCIAL),
+    ("bank account",            PIICategory.FINANCIAL),
+    ("account number",          PIICategory.FINANCIAL),
+    ("financial",               PIICategory.FINANCIAL),
+    # Name — require qualifier in bullet context; bare "name" excluded
+    ("full name",               PIICategory.NAME),
+    ("first name",              PIICategory.NAME),
+    ("last name",               PIICategory.NAME),
+    ("legal name",              PIICategory.NAME),
+    ("your name",               PIICategory.NAME),
+    # DOB — specific phrases
+    ("date of birth",           PIICategory.DOB),
+    ("birth date",              PIICategory.DOB),
+    ("birthdate",               PIICategory.DOB),
+    ("date of birth",           PIICategory.DOB),
+    ("dob",                     PIICategory.DOB),
+    # Biometric
+    ("facial recognition",      PIICategory.BIOMETRIC),
+    ("face recognition",        PIICategory.BIOMETRIC),
+    ("fingerprint",             PIICategory.BIOMETRIC),
+    ("iris scan",               PIICategory.BIOMETRIC),
+    ("biometric",               PIICategory.BIOMETRIC),
+]
+
+# ── Bullet exclusion: phrases that superficially contain a PII keyword ─────────
+# but are definitively NOT about PII collection (e.g. navigation links,
+# section headings, company references).  Each is a compiled word-boundary regex.
+_BULLET_EXCLUSIONS = [re.compile(p, re.IGNORECASE) for p in [
+    r'contact\s+us',
+    r'contact\s+page',
+    r'contact\s+form',
+    r'contact\s+details?\s+of\s+(?:our|the|company|officer|grievance)',
+    r'company\s+name',
+    r'brand\s+name',
+    r'product\s+name',
+    r'file\s+name',
+    r'domain\s+name',
+    r'app\s+name',
+    r'bank\s+holiday',
+    r'address\s+bar',
+    r'pan\s+(?:india|asian|pacific|american|european)',
+    r'medical\s+(?:disclaimer|advice|professional)',
+    r'health\s+(?:tips?|advice|disclaimer|insurance\s+claim)',
+    r'financial\s+(?:advice|disclaimer|year|planning\s+tips?)',
+]]
 
 SENSITIVITY_MAP = {
     PIICategory.AADHAAR:   Sensitivity.SENSITIVE,
@@ -191,7 +296,7 @@ def _get_st_model():
     global _st_model, _template_embeddings
     if _st_model is None:
         try:
-            from sentence_transformers import SentenceTransformer
+            from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
             import numpy as np
             _st_model = SentenceTransformer("all-MiniLM-L6-v2")
             templates = list(PURPOSE_TEMPLATES.values())
@@ -205,17 +310,149 @@ def _get_st_model():
 
 # ── HTTP fetch ────────────────────────────────────────────────────────────────
 
-def fetch_policy_text(url: str) -> tuple[str, str]:
+# GitHub domains it is safe to attach a user-supplied PAT to. The token is
+# NEVER sent anywhere else — a privacy policy hosted on an unrelated
+# third-party domain never sees it.
+_GITHUB_AUTH_DOMAINS = {
+    "github.com", "raw.githubusercontent.com",
+    "gist.github.com", "gist.githubusercontent.com",
+}
+
+# github.com/{owner}/{repo}/blob/{branch}/{path} is the human-facing web UI
+# page. It authenticates browsers via session cookies only — it does NOT
+# honor an "Authorization: Bearer <token>" header on a plain HTTP request,
+# so attaching a perfectly valid PAT to that URL has no effect and a
+# private repo still 404s exactly as if no token were sent at all. The
+# GitHub REST "contents" API (api.github.com) is the documented endpoint
+# that does accept a PAT via the Authorization header for private repos
+# (https://docs.github.com/en/rest/repos/contents). When the policy URL is
+# a recognizable blob-page URL, rewrite it to that API endpoint before
+# fetching — this also returns the raw file text directly, instead of the
+# full rendered GitHub web page (nav bar, file-tree sidebar, commit info)
+# that the old code had to strip HTML tags out of.
+_GITHUB_BLOB_RE = re.compile(
+    r'^https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/'
+    r'(?P<branch>[^/]+)/(?P<path>.+)$'
+)
+
+
+def _rewrite_github_blob_url(url: str) -> str | None:
+    """Convert a github.com blob-page URL to the api.github.com contents
+    endpoint. Returns None if `url` doesn't match that pattern (already a
+    raw/API URL, or a non-GitHub host) — caller then fetches `url` as-is."""
+    m = _GITHUB_BLOB_RE.match(url)
+    if not m:
+        return None
+    from urllib.parse import quote, unquote
+    owner, repo, branch, path = m.group("owner", "repo", "branch", "path")
+    # Normalize first (unquote then re-quote) so a path/branch that arrived
+    # already percent-encoded (e.g. a space as %20, copied straight from the
+    # browser's address bar) isn't double-encoded into %2520.
+    path = quote(unquote(path), safe="/")
+    branch = quote(unquote(branch))
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+
+
+def fetch_policy_text(url: str, github_token: str | None = None) -> tuple[str, str]:
     """
     Fetch and strip HTML.
     Returns: (clean_text_lower, raw_text_for_bullets)
+
+    If the policy lives in a private GitHub repo (the same repo being
+    scanned, for example), an unauthenticated fetch gets a 404 — GitHub
+    hides private repos from anonymous requests rather than returning 403.
+    When github_token is supplied and the URL's host is a GitHub domain,
+    it is attached as a Bearer token so private-repo policy files resolve
+    the same way the already-authenticated code scan does.
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept':     'text/html,application/xhtml+xml,*/*;q=0.8',
-    }
-    resp = requests.get(url, headers=headers, timeout=15)
+    from urllib.parse import urlparse
+
+    _api_url = _rewrite_github_blob_url(url)
+    fetch_url = _api_url or url
+
+    if _api_url:
+        # api.github.com contents endpoint: ask for the raw file bytes
+        # directly rather than the default JSON-wrapped+base64 response.
+        headers = {
+            'User-Agent':           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept':                'application/vnd.github.raw+json',
+            'X-GitHub-Api-Version':  '2022-11-28',
+        }
+    else:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept':     'text/html,application/xhtml+xml,*/*;q=0.8',
+        }
+    if github_token and (_api_url or urlparse(url).hostname in _GITHUB_AUTH_DOMAINS):
+        headers['Authorization'] = f'Bearer {github_token}'
+
+    resp = requests.get(fetch_url, headers=headers, timeout=15)
+
+    # The fetch itself succeeding (no exception) does NOT mean the URL
+    # pointed at an actual privacy policy. A 404/redirect-to-error page
+    # still returns HTML with a 200... or more commonly a non-2xx status
+    # that this code previously ignored entirely — silently parsing the
+    # site's nav bar / footer / "Page not found" body as if it were policy
+    # text. Fail loudly instead, so a wrong policy_url surfaces as a failed
+    # scan rather than as bogus PII/purpose/vagueness violations extracted
+    # from navigation links.
+    if resp.status_code != 200:
+        _auth_hint = ""
+        if resp.status_code == 404 and urlparse(url).hostname in _GITHUB_AUTH_DOMAINS:
+            if not github_token:
+                _auth_hint = (
+                    " If this is a private repository, provide a GitHub "
+                    "token with access to it."
+                )
+            else:
+                _auth_hint = (
+                    " A GitHub token was supplied but this still returned "
+                    "404 — check that the token has access to this "
+                    "repository (private-repo read scope) and that the "
+                    "file path and branch name are exactly correct."
+                )
+        raise ValueError(
+            f"Could not fetch privacy policy — {url} returned "
+            f"HTTP {resp.status_code}. Check that the URL is correct, "
+            f"publicly accessible, and points directly at the policy page "
+            f"(not a 404 or a page that redirects to one).{_auth_hint}"
+        )
+
     html = resp.text
+
+    # Even a 200 response can be a "soft 404" (error page served with a 200
+    # status) or an unrelated page — but only when the content came from
+    # scraping an arbitrary rendered HTML page (the non-API fetch path).
+    # There, we can't tell from the response alone whether it's the real
+    # policy or an error page that also happens to return 200, so a
+    # minimum-length sanity check is the only signal available — real
+    # policies are prose documents, soft-404 pages are short boilerplate.
+    #
+    # The GitHub Contents API path (_api_url truthy) has no such ambiguity:
+    # GitHub already told us, via the HTTP status code checked above,
+    # whether the exact file at that repo/branch/path exists and was
+    # returned (200) or not (a non-200, already raised). There's no
+    # "soft 404 disguised as 200" case to guard against here, so a length
+    # heuristic has nothing real to detect — it would just be guessing at
+    # how long a privacy policy "should" be, which rejects genuinely short
+    # (but real) files like a terse student/demo PRIVACY_POLICY.md for no
+    # logical reason. The only thing actually worth checking on this path
+    # is the one unambiguous failure case a 200 status doesn't rule out:
+    # the file existing but being empty.
+    _stripped_len = len(re.sub(r'<[^>]+>', ' ', html))
+    if _api_url:
+        if not html.strip():
+            raise ValueError(
+                f"Could not fetch privacy policy — {url} points to an "
+                f"empty file. Check that the file path and branch are "
+                f"correct and that the file actually has content."
+            )
+    elif _stripped_len < 1000:
+        raise ValueError(
+            f"Could not fetch privacy policy — {url} returned only "
+            f"{_stripped_len} characters of text content, far too short to "
+            f"be an actual privacy policy. The URL may be wrong or broken."
+        )
 
     # Preserve bullet structure by converting list tags to newlines first
     html_with_breaks = re.sub(r'<li[^>]*>', '\n• ', html, flags=re.IGNORECASE)
@@ -353,27 +590,49 @@ def _pass1_extract_pii(
                         third_party_sdk=None,
                     ))
 
-    # ── Pass 1b: bullet-list sub-pass ────────────────────────────────────
+    # ── Pass 1b: bullet-list sub-pass (NLP-enhanced) ────────────────────
     # Many privacy policies list PII types in <li> elements without a verb.
     # We detect lines that start with bullet markers and look for PII keywords
-    # without requiring a collection context verb.
+    # without requiring a collection context verb, using the more precise
+    # BULLET_PII_MAP (multi-word phrases, ambiguous single words excluded).
+    #
+    # False-positive gate: each bullet item is checked against BULLET_EXCLUSIONS
+    # before any keyword match is accepted.  Word-boundary matching prevents
+    # substring matches (e.g. "pan" inside "japan").
     bullet_pattern = re.compile(
-        r'^\s*(?:[•\-\*]|\d+[\.\)])\s+(.+)$',
+        r'^\s*(?:[•\-\*▪◦●→]|\d+[\.\)]|[a-z]\))\s+(.+)$',
         re.MULTILINE,
     )
     for match in bullet_pattern.finditer(raw_with_newlines):
-        item = match.group(1).strip().lower()
-        if len(item) < 3 or len(item) > 200:
+        item = match.group(1).strip()
+        item_lower = item.lower()
+        if len(item_lower) < 3 or len(item_lower) > 300:
             continue
-        for keyword, category in POLICY_PII_MAP.items():
-            if keyword in item and category not in seen:
+
+        # Exclusion gate — skip non-PII bullets that superficially contain keywords
+        if any(exc.search(item_lower) for exc in _BULLET_EXCLUSIONS):
+            continue
+
+        # Span tracking: prevents shorter phrases (e.g. "address") from
+        # re-matching inside an already-consumed longer phrase ("email address").
+        consumed_spans: list[tuple[int, int]] = []
+        for phrase, category in BULLET_PII_MAP:
+            if category in seen:
+                continue
+            # Use word-boundary regex so "pan" doesn't match inside "japan"
+            m = re.search(r'\b' + re.escape(phrase) + r'\b', item_lower)
+            if m:
+                # Skip if this match overlaps a span already consumed by a longer phrase
+                if any(cs[0] < m.end() and m.start() < cs[1] for cs in consumed_spans):
+                    continue
+                consumed_spans.append((m.start(), m.end()))
                 seen.add(category)
                 findings.append(DataFlowObject(
                     source="policy_parser_bullets",
                     file_path=None,
                     line_number=None,
-                    raw_text=item[:300],
-                    field_name=keyword,
+                    raw_text=item_lower[:300],
+                    field_name=phrase,
                     pii_category=category,
                     sensitivity=SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN),
                     third_party_sdk=None,
@@ -484,6 +743,7 @@ def _pass2_extract_purposes(
 
 def parse_privacy_policy(
     policy_url: str,
+    github_token: str | None = None,
 ) -> tuple[list[DataFlowObject], dict[PIICategory, set[str]], list[dict]]:
     """
     Fetch and analyse a privacy policy URL.
@@ -498,7 +758,7 @@ def parse_privacy_policy(
     validate_policy_url(policy_url)
 
     print(f"[policy] Fetching: {policy_url}")
-    full_text_lower, raw_with_newlines = fetch_policy_text(policy_url)
+    full_text_lower, raw_with_newlines = fetch_policy_text(policy_url, github_token)
     print(f"[policy] Got {len(full_text_lower)} characters")
 
     # ── Pass 1: PII extraction ────────────────────────────────────────────

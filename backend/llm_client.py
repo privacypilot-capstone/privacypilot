@@ -6,12 +6,14 @@ Provider-agnostic wrapper that exposes two public functions:
   generate_report_summary(scan_data)          → str  (executive summary)
   chat_completion(messages, scan_data)         → str  (chatbot turn)
 
-Provider priority (first key found wins):
-  1. GEMINI_API_KEY   → Google Gemini 2.0 Flash   (free tier, default)
-  2. ANTHROPIC_API_KEY → Anthropic Claude Haiku    (paid, low-cost)
+Provider priority — each configured provider is tried in turn, falling
+through to the next on any failure (not just "first key found wins"):
+  1. GEMINI_API_KEY    → Google Gemini
+  2. OPENAI_API_KEY     → OpenAI (gpt-4o-mini)
+  3. ANTHROPIC_API_KEY  → Anthropic Claude Haiku
 
-Both are called via plain HTTP (requests) — no extra package needed.
-If neither key is set, raises LLMNotConfiguredError so callers degrade
+All are called via plain HTTP (requests) — no extra package needed.
+If no key is set at all, raises LLMNotConfiguredError so callers degrade
 gracefully (summary = None, chatbot returns a static notice).
 """
 
@@ -23,11 +25,20 @@ import requests
 
 _GEMINI_KEY     = os.getenv("GEMINI_API_KEY")
 _ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY")
+_OPENAI_KEY      = os.getenv("OPENAI_API_KEY") 
 
-_GEMINI_URL     = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash:generateContent?key={key}"
-)
+# Ordered list: first working model wins at call time. gemini-2.0-flash and
+# gemini-2.0-flash-lite were confirmed "Shut down" per Google's own model
+# docs (ai.google.dev/gemini-api/docs/models) — kept failing with 404s.
+_GEMINI_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+]
+_GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+_OPENAI_URL     = "https://api.openai.com/v1/chat/completions"
+_OPENAI_MODEL   = "gpt-4o-mini"
 _ANTHROPIC_URL  = "https://api.anthropic.com/v1/messages"
 
 _TIMEOUT        = 60          # seconds per LLM call
@@ -101,7 +112,8 @@ def _scan_context_text(scan_data: dict) -> str:
 # ── Provider implementations ──────────────────────────────────────────────────
 
 def _call_gemini(system: str, messages: list[dict]) -> str:
-    """Call Gemini generateContent with a turn-based conversation."""
+    """Call Gemini generateContent with a turn-based conversation.
+    Tries each model in _GEMINI_MODELS until one succeeds."""
     # Gemini uses 'user'/'model' roles; inject system as a leading user turn
     gemini_contents = [
         {"role": "user",  "parts": [{"text": system}]},
@@ -118,11 +130,26 @@ def _call_gemini(system: str, messages: list[dict]) -> str:
             "temperature": 0.3,
         },
     }
-    url = _GEMINI_URL.format(key=_GEMINI_KEY)
-    resp = requests.post(url, json=payload, timeout=_TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    last_err = None
+    for model in _GEMINI_MODELS:
+        url = _GEMINI_BASE.format(model=model, key=_GEMINI_KEY)
+        try:
+            resp = requests.post(url, json=payload, timeout=_TIMEOUT)
+            if resp.status_code == 404:
+                print(f"[llm] Gemini model {model!r} not found (404), trying next…")
+                last_err = f"404 for model {model}"
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            print(f"[llm] Gemini success with model {model!r}")
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except requests.HTTPError as e:
+            print(f"[llm] Gemini model {model!r} failed: {e}")
+            last_err = str(e)
+            continue
+
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
 
 
 def _call_anthropic(system: str, messages: list[dict]) -> str:
@@ -144,15 +171,55 @@ def _call_anthropic(system: str, messages: list[dict]) -> str:
     return data["content"][0]["text"].strip()
 
 
+def _call_openai(system: str, messages: list[dict]) -> str:
+    """Call OpenAI's Chat Completions API."""
+    headers = {
+        "Authorization": f"Bearer {_OPENAI_KEY}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model":      _OPENAI_MODEL,
+        "max_tokens": _MAX_TOKENS,
+        "messages":   [{"role": "system", "content": system}] + messages,
+    }
+    resp = requests.post(_OPENAI_URL, json=payload, headers=headers, timeout=_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"[llm] OpenAI success with model {_OPENAI_MODEL!r}")
+    return data["choices"][0]["message"]["content"].strip()
+
+
 def _llm_call(system: str, messages: list[dict]) -> str:
-    """Route to whichever provider has a key configured."""
-    if _GEMINI_KEY:
-        return _call_gemini(system, messages)
-    if _ANTHROPIC_KEY:
-        return _call_anthropic(system, messages)
-    raise LLMNotConfiguredError(
-        "No LLM API key found. Set GEMINI_API_KEY or ANTHROPIC_API_KEY."
-    )
+    """Try each provider that has a key configured, in priority order,
+    falling through to the next on any failure — not just "first key
+    found wins" with no retry. Raises LLMNotConfiguredError only if no
+    provider has a key configured at all."""
+    global _GEMINI_KEY, _OPENAI_KEY, _ANTHROPIC_KEY
+    # Re-read at call time in case dotenv loaded after module import
+    _GEMINI_KEY    = _GEMINI_KEY or os.getenv("GEMINI_API_KEY")
+    _OPENAI_KEY    = _OPENAI_KEY or os.getenv("OPENAI_API_KEY")
+    _ANTHROPIC_KEY = _ANTHROPIC_KEY or os.getenv("ANTHROPIC_API_KEY")
+
+    providers = [
+        ("Gemini",    _GEMINI_KEY,    _call_gemini),
+        ("OpenAI",    _OPENAI_KEY,    _call_openai),
+        ("Anthropic", _ANTHROPIC_KEY, _call_anthropic),
+    ]
+    configured = [(name, fn) for name, key, fn in providers if key]
+    if not configured:
+        raise LLMNotConfiguredError(
+            "No LLM API key found. Set GEMINI_API_KEY, OPENAI_API_KEY, or "
+            "ANTHROPIC_API_KEY."
+        )
+
+    last_err: Exception | None = None
+    for name, fn in configured:
+        try:
+            return fn(system, messages)
+        except Exception as e:
+            print(f"[llm] {name} provider failed entirely: {e}")
+            last_err = e
+    raise last_err
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
-load_dotenv()   # must be FIRST — loads backend/.env before any module reads os.getenv()
+from pathlib import Path
+load_dotenv(Path(__file__).parent / ".env")  # explicit path
 
 import asyncio
 
@@ -61,124 +62,61 @@ def health():
 
 @app.post("/scan")
 async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
+    """
+    Enqueue a scan job and return immediately (async via Celery).
 
+    Returns {task_id, scan_id, status: "queued"}.
+    Poll GET /scans/{scan_id}/status for DB-level progress
+    or  GET /scan/status/{task_id} for Celery-level state.
+
+    Security: the GitHub token is never written to the database; it travels
+    only in the transient Redis task payload.
+    """
     # Security: never log the GitHub token
-    print(f"[scan] Starting scan — repo: {req.github_repo_url}")
-    print(f"[scan] Policy URL: {req.privacy_policy_url}")
+    print(f"[scan] Enqueuing scan — repo: {req.github_repo_url}")
+    print(f"[scan] Policy URL:      {req.privacy_policy_url}")
 
-    # ── Pre-create scan record with status=running ────────────────────────
+    # ── Pre-create scan record with status=queued ─────────────────────────
     scan = Scan(
         repo_url   = req.github_repo_url,
         policy_url = req.privacy_policy_url,
-        status     = "running",
+        status     = "queued",
     )
     db.add(scan)
     db.commit()
     scan_id = scan.id
-    print(f"[scan] Scan {scan_id} created with status=running")
+    print(f"[scan] Scan {scan_id} created with status=queued")
 
+    # ── Enqueue background task ───────────────────────────────────────────
+    # Lazy import so a missing celery package returns 503 instead of crashing
+    # the whole server on startup.
     try:
-        # ── Steps 1 + 2: Concurrent I/O — code scan and policy fetch ──────
-        # scan_github_repo  (GitHub API + regex/NER + AST) and
-        # parse_privacy_policy (HTTP fetch + regex) are independent I/O-bound
-        # operations.  asyncio.gather runs them concurrently; each is wrapped
-        # in asyncio.to_thread so the synchronous/blocking libraries
-        # (PyGitHub, requests) don't block the event loop.
-        (
-            (code_findings, usage_map),
-            (policy_claims, purpose_map, vagueness_warnings),
-        ) = await asyncio.gather(
-            asyncio.to_thread(scan_github_repo,
-                              req.github_repo_url, req.github_token),
-            asyncio.to_thread(parse_privacy_policy,
-                              req.privacy_policy_url),
+        from tasks import run_scan_task
+        task = run_scan_task.delay(
+            scan_id,
+            req.github_repo_url,
+            req.github_token,
+            req.privacy_policy_url,
         )
-
-        # ── Step 3: Detect notice gaps ────────────────────────────────────
-        code_pii       = {f.pii_category for f in code_findings}
-        policy_pii     = {f.pii_category for f in policy_claims}
-        gap_categories = code_pii - policy_pii
-
-        # ── Step 4: Run DPDP Rule Engine ──────────────────────────────────
-        # Rule 1 uses gap_categories; Rule 2 uses third_party_sdk on findings;
-        # Rule 3 uses usage_map ↔ purpose_map cross-reference;
-        # Vagueness uses vagueness_warnings from policy_parser.
-        violations = run_dpdp_rules(
-            code_findings,
-            policy_claims,
-            gap_categories,
-            usage_map=usage_map,
-            purpose_map=purpose_map,
-            vagueness_warnings=vagueness_warnings,
-        )
-
-        # ── Step 5: Compliance score ──────────────────────────────────────
-        # S = max(0, 100 − 15·|CRITICAL| − 8·|HIGH| − 4·|MEDIUM|)
-        # gap penalty removed — gaps are already captured as violations
-        compliance = calculate_compliance_score(
-            violations, len(code_findings), len(gap_categories)
-        )
-
-        # ── Step 6: Persist to database ───────────────────────────────────
-        scan.findings_count   = len(code_findings)
-        scan.policy_count     = len(policy_claims)
-        scan.gaps_count       = len(gap_categories)
-        scan.violations_count = len(violations)
-        scan.status           = "complete"
-
-        for f in code_findings[:200]:
-            db.add(Finding(
-                scan_id         = scan_id,
-                source          = f.source,
-                file_path       = f.file_path,
-                line_number     = f.line_number,
-                raw_text        = f.raw_text,
-                field_name      = f.field_name,
-                pii_category    = f.pii_category.value,
-                sensitivity     = f.sensitivity.value,
-                third_party_sdk = f.third_party_sdk,
-                is_gap          = f.pii_category in gap_categories,
-            ))
-
-        for v in violations:
-            db.add(Violation(
-                scan_id        = scan_id,
-                dpdp_section   = v.dpdp_section,
-                section_title  = v.section_title,
-                severity       = v.severity,
-                pii_category   = v.pii_category,
-                evidence       = v.evidence,
-                recommendation = v.recommendation,
-            ))
-
+    except ImportError as e:
+        scan.status = "failed"
         db.commit()
-        print(f"[db] Scan {scan_id} complete — {len(violations)} violations")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Import error: {e}",
+        )
 
-        # ── Step 7: Return response ───────────────────────────────────────
-        return {
-            "scan_id":             scan_id,
-            "code_findings_count": len(code_findings),
-            "policy_claims_count": len(policy_claims),
-            "gaps_detected":       sorted({g.value for g in gap_categories}),
-            "gaps_count":          len(gap_categories),
-            "violations_count":    len(violations),
-            "violations":          [v.to_dict() for v in violations],
-            "sample_findings":     [f.model_dump() for f in code_findings[:5]],
-            "compliance":          compliance,
-            # Surface derived data for UI / debugging
-            "purpose_map":         {k.value: list(v) for k, v in purpose_map.items()},
-            "usage_map":           {k.value: list(v) for k, v in usage_map.items()},
-            "vagueness_warnings":  vagueness_warnings,
-        }
-
-    except Exception as e:
-        try:
-            scan.status = "failed"
-            db.commit()
-            print(f"[db] Scan {scan_id} marked as failed")
-        except Exception:
-            db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+    print(f"[scan] Task {task.id} enqueued for scan {scan_id}")
+    return {
+        "task_id": task.id,
+        "scan_id": scan_id,
+        "status":  "queued",
+        "message": (
+            f"Scan enqueued. "
+            f"Poll /scans/{scan_id}/status for progress or "
+            f"/scan/status/{task.id} for Celery state."
+        ),
+    }
 
 
 @app.get("/scans")
@@ -204,7 +142,35 @@ def get_scan_status(scan_id: int, db: Session = Depends(get_db)):
         "scan_id":  scan_id,
         "status":   scan.status,
         "repo_url": scan.repo_url,
+        "error_message": scan.error_message,
     }
+
+@app.get("/scan/status/{task_id}")
+def get_task_status(task_id: str):
+    """
+    Celery-level task state for an async scan.
+
+    States: PENDING → STARTED → SUCCESS | FAILURE | RETRY
+    For the DB-level status (queued/running/complete/failed) use
+    GET /scans/{scan_id}/status instead.
+    """
+    try:
+        from tasks import celery_app
+        result = celery_app.AsyncResult(task_id)
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Celery not available")
+
+    resp: dict = {
+        "task_id": task_id,
+        "state":   result.state,   # PENDING | STARTED | SUCCESS | FAILURE | RETRY
+    }
+    if result.state == "SUCCESS":
+        resp["result"] = result.result   # dict returned by run_scan_task
+    elif result.state in ("FAILURE", "RETRY"):
+        resp["error"] = str(result.info)
+    return resp
+
+
 
 
 @app.get("/scans/{scan_id}/violations")
@@ -222,12 +188,82 @@ def get_violations(scan_id: int, db: Session = Depends(get_db)):
     } for v in violations]
 
 
+
+@app.get("/scans/{scan_id}/result")
+def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
+    """
+    Return the full scan result including violations, findings, and compliance score.
+    Call this after polling /scans/{scan_id}/status shows status='complete'.
+    """
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.status not in ("complete", "failed"):
+        raise HTTPException(
+            status_code=202,
+            detail=f"Scan is still {scan.status}. Poll /scans/{scan_id}/status first.",
+        )
+
+    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
+    findings   = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+
+    class _FakeV:
+        def __init__(self, s): self.severity = s
+
+    compliance = calculate_compliance_score(
+        [_FakeV(v.severity) for v in violations],
+        scan.findings_count or 0,
+        scan.gaps_count or 0,
+    )
+
+    return {
+        "scan_id":          scan_id,
+        "repo_url":         scan.repo_url,
+        "policy_url":       scan.policy_url,
+        "status":           scan.status,
+        "findings_count":   scan.findings_count or 0,
+        "violations_count": scan.violations_count or 0,
+        "gaps_count":       scan.gaps_count or 0,
+        "gaps_detected": list({
+            f.pii_category for f in findings if f.is_gap
+        }),
+        "compliance": compliance,
+        "violations": [
+            {
+                "dpdp_section":   v.dpdp_section,
+                "section_title":  v.section_title,
+                "severity":       v.severity,
+                "pii_category":   v.pii_category,
+                "evidence":       v.evidence,
+                "recommendation": v.recommendation,
+            }
+            for v in violations
+        ],
+        "sample_findings": [
+            {
+                "pii_category": f.pii_category,
+                "file_path":    f.file_path,
+                "line_number":  f.line_number,
+                "source":       f.source,
+                "raw_text":     f.raw_text,
+            }
+            for f in findings[:30]
+        ],
+    }
+
 @app.get("/report/{scan_id}")
 def get_report(
     scan_id: int,
     format: str = "html",
     db: Session = Depends(get_db)
 ):
+    """
+    Generate the compliance report for a completed scan.
+
+    Fetches (or lazily generates) the LLM executive summary and embeds it
+    as a plain-English narrative section in both the HTML and PDF outputs.
+    If no LLM key is configured the report is still generated without it.
+    """
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -245,12 +281,59 @@ def get_report(
         scan.gaps_count,
     )
 
-    html = generate_report_html(scan, violations, findings, compliance)
+    # ── Fetch or generate the LLM narrative ──────────────────────────────────
+    # Use the cached ai_summary if available; otherwise generate on-the-fly
+    # and cache it so future downloads are instant.
+    narrative: str | None = scan.ai_summary
+    if narrative is None:
+        try:
+            scan_data = {
+                "scan_id":             scan_id,
+                "repo_url":            scan.repo_url,
+                "policy_url":          scan.policy_url,
+                "code_findings_count": scan.findings_count or 0,
+                "gaps_detected":       list({f.pii_category for f in findings if f.is_gap}),
+                "compliance":          compliance,
+                "violations": [
+                    {
+                        "dpdp_section":   v.dpdp_section,
+                        "section_title":  v.section_title,
+                        "severity":       v.severity,
+                        "pii_category":   v.pii_category,
+                        "evidence":       v.evidence,
+                        "recommendation": v.recommendation,
+                    }
+                    for v in violations
+                ],
+                "sample_findings": [
+                    {
+                        "pii_category": f.pii_category,
+                        "file_path":    f.file_path,
+                        "line_number":  f.line_number,
+                        "source":       f.source,
+                    }
+                    for f in findings[:10]
+                ],
+            }
+            narrative = generate_report_summary(scan_data)
+            # Cache for future report downloads
+            scan.ai_summary = narrative
+            db.commit()
+            print(f"[report] LLM narrative generated and cached for scan {scan_id}")
+        except LLMNotConfiguredError:
+            print(f"[report] No LLM key configured — report will omit narrative section")
+            narrative = None
+        except Exception as e:
+            print(f"[report] LLM narrative generation failed: {e} — continuing without it")
+            narrative = None
+
+    # ── Build and return the report ───────────────────────────────────────────
+    html = generate_report_html(scan, violations, findings, compliance, narrative=narrative)
 
     if format == "pdf":
         try:
             from pdf_generator import generate_pdf
-            pdf_bytes = generate_pdf(scan, violations, findings, compliance)
+            pdf_bytes = generate_pdf(scan, violations, findings, compliance, narrative=narrative)
             return Response(
                 content=pdf_bytes,
                 media_type="application/pdf",
@@ -430,7 +513,7 @@ def send_chat_message(
     except LLMNotConfiguredError as e:
         reply = (
             "⚠️ The AI advisor is not configured. "
-            "Please set GEMINI_API_KEY or ANTHROPIC_API_KEY in the server environment."
+            "Please set GEMINI_API_KEY or OPENAI_API_KEY in the server environment."
         )
     except Exception as e:
         reply = f"⚠️ LLM error: {e}"

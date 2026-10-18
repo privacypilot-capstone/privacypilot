@@ -60,6 +60,37 @@ QUEUE_SINKS = {
 
 ALL_SDK_SINKS = ANALYTICS_SDKS | COMMUNICATION_SDKS
 
+# ── Rule 3: module-type → purpose-category mapping ─────────────────────────
+# The code scanner's module classifier (scanners/code_scanner.py,
+# MODULE_PATH_KEYWORDS / MODULE_FUNC_KEYWORDS) and the policy parser's
+# purpose classifier (scanners/policy_parser.py, PURPOSE_CATEGORIES) use two
+# independently-named label vocabularies. This table translates each
+# module-type label into the purpose-category label(s) it legitimately
+# serves, so Rule 3 compares like with like instead of doing a raw
+# string-difference between two different taxonomies (which only ever
+# agreed on the word "analytics"). Each mapping is grounded in the keyword
+# lists the two classifiers already use:
+#   - authentication code (auth/login/oauth/session) maps to
+#     "service_delivery" (whose keywords include authenticate/login/access)
+#     and to "security" (auth is itself a security control).
+#   - payment/database/api/storage code all exist to run the product, so
+#     they map to "service_delivery".
+#   - notification code maps to "communication" (notif/alert/email/sms).
+#   - logging code maps to "security" (its own keyword list includes
+#     "audit").
+#   - analytics code maps to "analytics" and, since tracking/telemetry is
+#     also commonly monetised, "marketing".
+MODULE_TO_PURPOSE: dict[str, set[str]] = {
+    'analytics':      {'analytics', 'marketing'},
+    'authentication': {'service_delivery', 'security'},
+    'payment':        {'service_delivery'},
+    'notification':   {'communication'},
+    'database':       {'service_delivery'},
+    'api':            {'service_delivery'},
+    'storage':        {'service_delivery'},
+    'logging':        {'security'},
+}
+
 
 class DPDPViolation:
     def __init__(self, section, title, severity, pii_category, evidence, recommendation):
@@ -188,10 +219,11 @@ def run_dpdp_rules(
             key = f"r2_log_{cat.value}_{sdk}"
             if key not in seen:
                 seen.add(key)
+                is_sensitive = cat in SENSITIVE_CATEGORIES
                 violations.append(DPDPViolation(
                     section="Section 8(5)",
                     title="Security Safeguard — PII in Logger Output",
-                    severity="high",
+                    severity="critical" if is_sensitive else "high",
                     pii_category=cat.value,
                     evidence=(
                         f"'{cat.value}' data appears in a log/print statement "
@@ -252,9 +284,26 @@ def run_dpdp_rules(
     if usage_map and purpose_map:
         for cat, code_uses in usage_map.items():
             policy_purposes = purpose_map.get(cat, set())
-            # Overlap check: any code use not covered by a policy purpose
-            uncovered = code_uses - policy_purposes
-            if uncovered:
+
+            # Translate each module-type label into the purpose category(ies)
+            # it legitimately serves (MODULE_TO_PURPOSE above), then flag any
+            # module type whose translated purposes have no overlap with the
+            # policy's stated purposes for this PII category.
+            uncovered_modules: set[str] = set()
+            inferred_purposes: set[str] = set()
+            for module_type in code_uses:
+                expected = MODULE_TO_PURPOSE.get(module_type)
+                if expected is None:
+                    # Unknown module-type label (e.g. a new entry added to
+                    # MODULE_PATH_KEYWORDS without a matching mapping here):
+                    # fail safe with a direct-label comparison rather than
+                    # silently skipping it.
+                    expected = {module_type}
+                inferred_purposes |= expected
+                if not (expected & policy_purposes):
+                    uncovered_modules.add(module_type)
+
+            if uncovered_modules:
                 key = f"r3_{cat.value}"
                 if key not in seen:
                     seen.add(key)
@@ -267,22 +316,25 @@ def run_dpdp_rules(
                         f" (found at: {'; '.join(_loc_strs)})"
                         if _loc_strs else ""
                     )
+                    is_sensitive = cat in SENSITIVE_CATEGORIES
                     violations.append(DPDPViolation(
                         section="Section 6(1)",
                         title="Purpose–PII Linkage — Processing Exceeds Stated Purpose",
-                        severity="high",
+                        severity="critical" if is_sensitive else "high",
                         pii_category=cat.value,
                         evidence=(
-                            f"'{cat.value}' data is used for {sorted(uncovered)} "
-                            f"in the codebase{_loc_clause}, but the privacy policy "
-                            f"only states purposes: "
+                            f"'{cat.value}' data is used in code module(s) "
+                            f"{sorted(uncovered_modules)}{_loc_clause}, whose "
+                            f"typical purpose is not among the privacy "
+                            f"policy's stated purposes for this data: "
                             f"{sorted(policy_purposes) or ['none found']}. "
                             f"Section 6(1) requires consent to be specific to the "
                             f"stated purpose; processing for unstated purposes is "
                             f"non-consensual."
                         ),
                         recommendation=(
-                            f"Either add the purpose(s) {sorted(uncovered)} to the "
+                            f"Either disclose the purpose(s) "
+                            f"{sorted(inferred_purposes - policy_purposes)} in the "
                             f"privacy policy and obtain fresh consent, or restrict "
                             f"'{cat.value}' processing to the already-disclosed "
                             f"purposes: {sorted(policy_purposes) or ['none']}."
@@ -298,6 +350,14 @@ def run_dpdp_rules(
             key = f"vague_{w.get('pii_category', 'unknown')}"
             if key not in seen:
                 seen.add(key)
+                # Policy-based violations have no source file/line — the
+                # nearest equivalent is the actual ambiguous clause text, so
+                # quote it directly rather than leaving the location blank.
+                _sentence = (w.get("sentence") or "").strip()
+                _quote_clause = (
+                    f" The flagged clause: \"{_sentence}\""
+                    if _sentence else ""
+                )
                 violations.append(DPDPViolation(
                     section="DPDP Rules 2025, Rule 3(b)(ii)",
                     title="Vague Purpose Statement",
@@ -307,9 +367,11 @@ def run_dpdp_rules(
                         f"The privacy policy's purpose statement for "
                         f"'{w.get('pii_category')}' is ambiguous: the classifier "
                         f"margin between top-2 categories is "
-                        f"{w.get('margin', 0):.3f} (threshold 0.08). "
+                        f"{w.get('margin', 0):.3f} (threshold 0.08), closest to "
+                        f"'{w.get('top_label', 'unknown')}'. "
                         f"Rule 3(b)(ii) of DPDP Rules 2025 requires the notice "
-                        f"to specify the purpose of processing in clear and plain language."
+                        f"to specify the purpose of processing in clear and "
+                        f"plain language.{_quote_clause}"
                     ),
                     recommendation=(
                         f"Rewrite the purpose clause for '{w.get('pii_category')}' "

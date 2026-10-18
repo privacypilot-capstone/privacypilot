@@ -1,455 +1,351 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
+import Layout from './Layout';
+import ResultsDashboard from './components/ResultsDashboard';
 
-const STYLE = {
-  page:  { padding: '2rem', fontFamily: 'sans-serif', maxWidth: '860px', margin: '0 auto' },
-  h1:    { fontSize: '2rem', marginBottom: '0.25rem' },
-  sub:   { color: '#666', marginBottom: '2rem' },
-  label: { display: 'block', fontWeight: 'bold', marginBottom: '4px', marginTop: '16px' },
-  input: { width: '100%', padding: '8px 12px', fontSize: '14px', borderRadius: '6px',
-           border: '1px solid #ccc', boxSizing: 'border-box' },
-  btn:   { marginTop: '20px', padding: '10px 28px', fontSize: '15px', background: '#1a1a2e',
-           color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' },
-  result:{ marginTop: '2rem', background: '#f5f5f5', borderRadius: '8px', padding: '1.5rem' },
-  // Gap chip — inline pill inside a flex-wrap container
-  chip:  { display: 'inline-flex', alignItems: 'center',
-           background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '99px',
-           padding: '4px 14px', fontFamily: 'monospace', fontSize: '13px', fontWeight: '600' },
-  // ── Chat panel ─────────────────────────────────────────────────────────
-  chatBtn: {
-    position: 'fixed', bottom: '28px', right: '28px', width: '56px', height: '56px',
-    borderRadius: '50%', background: '#1a1a2e', color: '#fff', border: 'none',
-    fontSize: '24px', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.25)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-  },
-  chatPanel: {
-    position: 'fixed', bottom: '96px', right: '28px', width: '380px',
-    height: '500px', background: '#fff', borderRadius: '14px',
-    boxShadow: '0 8px 40px rgba(0,0,0,0.18)', display: 'flex', flexDirection: 'column',
-    zIndex: 1000, border: '1px solid #dee2e6', overflow: 'hidden',
-  },
-  chatHeader: {
-    background: '#1a1a2e', color: '#fff', padding: '12px 16px',
-    fontWeight: 'bold', fontSize: '14px', display: 'flex',
-    justifyContent: 'space-between', alignItems: 'center',
-  },
-  chatBody: {
-    flex: 1, overflowY: 'auto', padding: '12px 14px',
-    display: 'flex', flexDirection: 'column', gap: '10px',
-  },
-  chatInputRow: {
-    display: 'flex', gap: '8px', padding: '10px 12px',
-    borderTop: '1px solid #dee2e6', background: '#f8f9fa',
-  },
-  chatInput: {
-    flex: 1, padding: '8px 12px', borderRadius: '20px',
-    border: '1px solid #ccc', fontSize: '13px', outline: 'none',
-  },
-  chatSend: {
-    padding: '8px 16px', borderRadius: '20px', background: '#1a1a2e',
-    color: '#fff', border: 'none', cursor: 'pointer', fontSize: '13px',
-  },
-  bubbleUser: {
-    alignSelf: 'flex-end', background: '#1a1a2e', color: '#fff',
-    borderRadius: '16px 16px 4px 16px', padding: '8px 14px',
-    fontSize: '13px', maxWidth: '80%', lineHeight: 1.5,
-  },
-  bubbleBot: {
-    alignSelf: 'flex-start', background: '#f0f4ff', color: '#111',
-    borderRadius: '16px 16px 16px 4px', padding: '8px 14px',
-    fontSize: '13px', maxWidth: '85%', lineHeight: 1.5, whiteSpace: 'pre-wrap',
-  },
-  bubbleTyping: {
-    alignSelf: 'flex-start', background: '#f0f4ff', color: '#888',
-    borderRadius: '16px', padding: '8px 14px', fontSize: '13px',
-  },
-  stat:  { display: 'inline-block', background: '#1a1a2e', color: '#fff',
-           borderRadius: '6px', padding: '8px 20px', margin: '4px 8px 4px 0',
-           fontWeight: 'bold', fontSize: '1.1rem' },
-}
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-// Severity → { bg, border, cardBg, label }
-const SEV = {
-  critical: { bg: '#dc3545', border: '#dc3545', card: '#fff5f5' },
-  high:     { bg: '#fd7e14', border: '#fd7e14', card: '#fff8f0' },
-  medium:   { bg: '#ffc107', border: '#ffc107', card: '#fffdf0' },
-  low:      { bg: '#28a745', border: '#28a745', card: '#f0fff4' },
-}
+const SCAN_STEPS = [
+  { label: 'Cloning repository',        sub: 'Fetching files via GitHub API' },
+  { label: 'Scanning for PII',          sub: 'Running regex + NER classifiers' },
+  { label: 'Parsing privacy policy',    sub: 'Extracting PII disclosures' },
+  { label: 'Detecting consent gaps',    sub: 'Comparing code vs. policy claims' },
+  { label: 'Running DPDP rule engine',  sub: 'Checking 5 DPDP Act sections' },
+  { label: 'Computing compliance score',sub: 'Calculating risk-weighted score' },
+];
+
+const LogoMark = () => (
+  <svg width="30" height="34" viewBox="0 0 64 72" fill="none">
+    <path d="M32 3 L60 14 V38 C60 55 48 67 32 72 C16 67 4 55 4 38 V14 Z"
+      fill="rgba(16,185,129,0.12)" stroke="#10b981" strokeWidth="1.5"/>
+    <rect x="31" y="30" width="2" height="22" fill="#10b981"/>
+    <rect x="23" y="52" width="18" height="2.5" rx="1.2" fill="#10b981"/>
+    <rect x="14" y="22" width="36" height="2" rx="1" fill="#10b981"/>
+    <circle cx="32" cy="21" r="2.5" fill="#10b981"/>
+    <rect x="14.5" y="24" width="1.5" height="9" fill="#10b981"/>
+    <rect x="48" y="24" width="1.5" height="9" fill="#10b981"/>
+  </svg>
+);
+
+const GithubIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.73.083-.73 1.205.085 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.418-1.305.762-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23a11.5 11.5 0 0 1 3-.405c1.02.005 2.045.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12"/>
+  </svg>
+);
+
+const PolicyIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+    <polyline points="14 2 14 8 20 8"/>
+    <line x1="9" y1="13" x2="15" y2="13"/>
+    <line x1="9" y1="17" x2="12" y2="17"/>
+  </svg>
+);
+
+const LockIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+    <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+  </svg>
+);
+
+const SearchIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </svg>
+);
+
+const AlertIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <circle cx="12" cy="12" r="10"/>
+    <line x1="12" y1="8" x2="12" y2="12"/>
+    <line x1="12" y1="16" x2="12.01" y2="16"/>
+  </svg>
+);
 
 export default function App() {
-  const [form,    setForm]    = useState({ github_repo_url: '', privacy_policy_url: '', github_token: '' })
-  const [result,  setResult]  = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState(null)
+  const [repo,      setRepo]   = useState('');
+  const [policy,   setPolicy] = useState('');
+  const [token,    setToken]  = useState('');
+  const [loading,  setLoad]   = useState(false);
+  const [stepIdx,  setStep]   = useState(0);
+  const [result,   setResult] = useState(null);
+  const [error,    setError]  = useState('');
+  const [aiSummary, setAiSummary] = useState(null);
+  const [aiLoading, setAiLoad]    = useState(false);
+  const [aiError,   setAiError]   = useState('');
+  const stepTimer = useRef(null);
 
-  // ── Chat state ─────────────────────────────────────────────────────────
-  const [chatOpen,    setChatOpen]    = useState(false)
-  const [sessionId,   setSessionId]   = useState(null)
-  const [chatMsgs,    setChatMsgs]    = useState([])
-  const [chatInput,   setChatInput]   = useState('')
-  const [chatLoading, setChatLoading] = useState(false)
-  const [aiSummary,   setAiSummary]   = useState(null)
-  const [summaryLoading, setSummaryLoading] = useState(false)
-  const chatBodyRef = useRef(null)
-
-  // Auto-scroll chat to bottom
   useEffect(() => {
-    if (chatBodyRef.current) {
-      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight
+    if (loading) {
+      setStep(0);
+      stepTimer.current = setInterval(() => {
+        setStep(s => s < SCAN_STEPS.length - 1 ? s + 1 : s);
+      }, 25000);
+    } else {
+      clearInterval(stepTimer.current);
     }
-  }, [chatMsgs, chatLoading])
+    return () => clearInterval(stepTimer.current);
+  }, [loading]);
 
-  // When a scan completes: fetch AI summary and create a chat session
-  useEffect(() => {
-    if (!result?.scan_id) return
-    // Fetch AI summary
-    setSummaryLoading(true)
-    fetch(`http://localhost:8000/scans/${result.scan_id}/summary`)
-      .then(r => r.json())
-      .then(d => setAiSummary(d.summary))
-      .catch(() => setAiSummary(null))
-      .finally(() => setSummaryLoading(false))
-    // Create chat session
-    fetch(`http://localhost:8000/chat/sessions?scan_id=${result.scan_id}`, { method: 'POST' })
-      .then(r => r.json())
-      .then(d => setSessionId(d.session_id))
-      .catch(() => {})
-  }, [result?.scan_id])
-
-  const sendChatMessage = async () => {
-    const text = chatInput.trim()
-    if (!text || !sessionId || chatLoading) return
-    setChatInput('')
-    setChatMsgs(m => [...m, { role: 'user', content: text }])
-    setChatLoading(true)
+  const fetchAI = async (scanId) => {
+    setAiLoad(true);
+    setAiError('');
     try {
-      const res = await fetch(`http://localhost:8000/chat/sessions/${sessionId}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text }),
-      })
-      const data = await res.json()
-      setChatMsgs(m => [...m, { role: 'assistant', content: data.content }])
-    } catch {
-      setChatMsgs(m => [...m, { role: 'assistant', content: '⚠️ Connection error. Please try again.' }])
-    } finally {
-      setChatLoading(false)
-    }
-  }
-
-  const update = (k, v) => setForm(f => ({ ...f, [k]: v }))
-
-  const runScan = async () => {
-    setLoading(true)
-    setResult(null)
-    setError(null)
-    try {
-      const res = await fetch('http://localhost:8000/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Scan failed')
-      setResult(data)
+      const r = await fetch(`${API}/scans/${scanId}/summary`);
+      if (r.ok) {
+        const d = await r.json();
+        setAiSummary(d.summary);
+      } else {
+        const d = await r.json().catch(() => ({}));
+        setAiError(d.detail || `AI summary failed (HTTP ${r.status})`);
+      }
     } catch (e) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
+      setAiError(`Could not reach the AI summary service: ${e.message}`);
     }
+    setAiLoad(false);
+  };
+
+  const startScan = async () => {
+    setError('');
+    setResult(null);
+    setAiSummary(null);
+    setAiError('');
+    setLoad(true);
+    try {
+      // ── Step 1: Enqueue the scan (returns immediately with scan_id) ──
+      const r = await fetch(`${API}/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          github_repo_url:    repo.trim(),
+          privacy_policy_url: policy.trim(),
+          github_token:       token.trim(),
+        }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || `Server error ${r.status}`);
+      }
+      const { scan_id } = await r.json();
+
+      // ── Step 2: Poll until complete or failed (max ~10 min) ──
+      const POLL_INTERVAL = 4000;   // ms between polls
+      const MAX_POLLS     = 150;    // 150 × 4 s = 10 min timeout
+      let attempts = 0;
+      while (attempts < MAX_POLLS) {
+        await new Promise(res => setTimeout(res, POLL_INTERVAL));
+        const sr = await fetch(`${API}/scans/${scan_id}/status`);
+        if (!sr.ok) throw new Error(`Status check failed: ${sr.status}`);
+        const sd = await sr.json();
+        if (sd.status === 'complete') break;
+        if (sd.status === 'failed')   throw new Error(sd.error_message || 'The scan worker encountered an error. Check backend logs.');
+        attempts++;
+      }
+      if (attempts >= MAX_POLLS) throw new Error('Scan timed out after 10 minutes. The repository may be too large.');
+
+      // ── Step 3: Fetch full result ──
+      const rr = await fetch(`${API}/scans/${scan_id}/result`);
+      if (!rr.ok) {
+        const d = await rr.json().catch(() => ({}));
+        throw new Error(d.detail || `Could not fetch results: ${rr.status}`);
+      }
+      const data = await rr.json();
+      setResult(data);
+      fetchAI(scan_id);
+    } catch (e) {
+      setError(e.message || 'Scan failed. Check backend logs.');
+    } finally {
+      setLoad(false);
+    }
+  };
+
+  const canScan  = repo.trim() && policy.trim() && token.trim() && !loading;
+  const progress = ((stepIdx + 1) / SCAN_STEPS.length) * 100;
+
+  /* ─── Results view (keeps sidebar Layout) ─────────────────── */
+  if (result && !loading) {
+    return (
+      <Layout>
+        <div className="topbar">
+          <div className="topbar-breadcrumb"><span>Scan Results</span></div>
+          <div className="topbar-right">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => { setResult(null); setAiSummary(null); setAiError(''); setError(''); }}
+            >
+              ← New Scan
+            </button>
+          </div>
+        </div>
+        <div className="page-content">
+          <ResultsDashboard
+            scanId={result.scan_id}
+            result={result}
+            violations={result.violations}
+            findings={result.sample_findings}
+            compliance={result.compliance}
+            aiSummary={aiSummary}
+            aiLoading={aiLoading}
+            aiError={aiError}
+          />
+        </div>
+      </Layout>
+    );
   }
 
-  // Deduplicate gap categories — backend returns a set but be defensive
-  const uniqueGaps = result ? [...new Set(result.gaps_detected ?? [])] : []
-
+  /* ─── Standalone full-page scan / loading ─────────────────── */
   return (
-    <>
-      <div style={{ background: '#1a1a2e', padding: '10px 2rem', display: 'flex', gap: '20px' }}>
-        <span style={{ color: '#fff', fontWeight: 'bold' }}>PrivacyPilot</span>
-        <a href="/" style={{ color: '#aaa', fontSize: '14px', textDecoration: 'none' }}>New Scan</a>
-        <a href="/history" style={{ color: '#aaa', fontSize: '14px', textDecoration: 'none' }}>History</a>
-      </div>
+    <div className="sa-page">
+      {/* Background layers */}
+      <div className="sa-bg-grid" />
+      <div className="sa-bg-glow-top" />
+      <div className="sa-bg-glow-bottom" />
 
-      <div style={STYLE.page}>
-        <h1 style={STYLE.h1}>PrivacyPilot</h1>
-        <p style={STYLE.sub}>DPDP Act 2023 Compliance Scanner</p>
+      {/* Navbar */}
+      <nav className="sa-nav">
+        <Link to="/" className="sa-nav-logo">
+          <LogoMark />
+          <span className="sa-nav-name">PrivacyPilot</span>
+        </Link>
+        <Link to="/" className="sa-nav-back">← Back to home</Link>
+      </nav>
 
-        <label style={STYLE.label}>GitHub Repository URL</label>
-        <input style={STYLE.input} placeholder="https://github.com/owner/repo"
-          value={form.github_repo_url}
-          onChange={e => update('github_repo_url', e.target.value)} />
+      {/* Content */}
+      <main className="sa-main">
 
-        <label style={STYLE.label}>Privacy Policy URL</label>
-        <input style={STYLE.input} placeholder="https://example.com/privacy"
-          value={form.privacy_policy_url}
-          onChange={e => update('privacy_policy_url', e.target.value)} />
-
-        <label style={STYLE.label}>GitHub Token</label>
-        <input style={STYLE.input} type="password" placeholder="ghp_..."
-          value={form.github_token}
-          onChange={e => update('github_token', e.target.value)} />
-
-        <button style={STYLE.btn} onClick={runScan} disabled={loading}>
-          {loading ? 'Scanning… (this takes 2–3 min)' : 'Run Compliance Scan'}
-        </button>
-
-        {error && <p style={{ color: 'red', marginTop: '1rem' }}>{error}</p>}
-
-        {result && (
-          <div style={STYLE.result}>
-            <h2 style={{ marginTop: 0 }}>Scan Results</h2>
-
-            {/* ── Compliance score card ──────────────────────────────── */}
-            {result.compliance && (
-              <div style={{
-                textAlign: 'center', padding: '1.5rem', background: '#fff',
-                borderRadius: '10px', marginBottom: '1.2rem',
-                border: '2px solid ' + result.compliance.color,
-              }}>
-                <div style={{ fontSize: '4rem', fontWeight: 'bold', color: result.compliance.color }}>
-                  {result.compliance.score}
-                  <span style={{ fontSize: '1.5rem', color: '#888' }}>/100</span>
-                </div>
-                <div style={{ fontSize: '1.2rem', fontWeight: 'bold', color: result.compliance.color }}>
-                  {result.compliance.rating} Compliance
-                </div>
-                <div style={{ fontSize: '13px', color: '#666', marginTop: '6px' }}>
-                  {result.compliance.critical_count ?? 0} critical ·{' '}
-                  {result.compliance.high_count    ?? 0} high ·{' '}
-                  {result.compliance.medium_count  ?? 0} medium severity violations
-                </div>
-              </div>
-            )}
-
-            {/* ── Summary stats ──────────────────────────────────────── */}
-            <div style={{ marginBottom: '1rem' }}>
-              <span style={STYLE.stat}>{result.code_findings_count} PII findings in code</span>
-              <span style={STYLE.stat}>{result.policy_claims_count} claims in policy</span>
-              <span style={{
-                ...STYLE.stat,
-                background: result.gaps_count > 0 ? '#dc3545' : '#28a745',
-              }}>
-                {uniqueGaps.length} consent gap{uniqueGaps.length !== 1 ? 's' : ''}
-              </span>
+        {loading ? (
+          /* ── Loading state ─────────────── */
+          <div className="sa-loading">
+            <div className="sa-orb">
+              <div className="sa-ring sa-ring-1" />
+              <div className="sa-ring sa-ring-2" />
+              <div className="sa-ring-icon"><SearchIcon /></div>
             </div>
 
-            {/* ── Consent gaps ───────────────────────────────────────── */}
-            {uniqueGaps.length > 0 && (
-              <div style={{
-                background: '#fff', border: '1px solid #dee2e6',
-                borderRadius: '8px', padding: '1rem 1.2rem', marginBottom: '1.2rem',
-              }}>
-                <h3 style={{ margin: '0 0 6px' }}>
-                  ⚠️ Consent Gaps Detected ({uniqueGaps.length})
-                </h3>
-                <p style={{ color: '#666', fontSize: '13px', margin: '0 0 12px' }}>
-                  These PII types are processed in the source code but are <strong>NOT</strong> disclosed in the privacy policy:
-                </p>
-                {/* Flex-wrap chip row — no more duplicate block divs */}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                  {uniqueGaps.map(g => (
-                    <span key={g} style={STYLE.chip}>{g}</span>
-                  ))}
-                </div>
+            <div className="sa-loading-step-label">{SCAN_STEPS[stepIdx].label}</div>
+            <div className="sa-loading-step-sub">{SCAN_STEPS[stepIdx].sub}</div>
+
+            <div className="sa-prog-track">
+              <div className="sa-prog-bar" style={{ width: `${progress}%` }}>
+                <span className="sa-prog-dot" />
               </div>
-            )}
+            </div>
 
-            {/* ── DPDP Violations ────────────────────────────────────── */}
-            {result.violations && result.violations.length > 0 && (
-              <>
-                <h3 style={{ marginTop: '1rem', marginBottom: '10px' }}>
-                  🚨 DPDP Act Violations ({result.violations.length})
-                </h3>
-                {result.violations.map((v, i) => {
-                  const sev = SEV[v.severity] ?? SEV.medium
-                  return (
-                    <div key={i} style={{
-                      border: `1px solid ${sev.border}`,
-                      borderLeft: `4px solid ${sev.bg}`,
-                      borderRadius: '8px', padding: '1rem', marginBottom: '10px',
-                      background: sev.card,
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                        <strong style={{ fontSize: '14px' }}>{v.dpdp_section} — {v.section_title}</strong>
-                        <span style={{
-                          background: sev.bg, color: v.severity === 'medium' ? '#333' : '#fff',
-                          padding: '2px 10px', borderRadius: '99px',
-                          fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap', marginLeft: '8px',
-                        }}>
-                          {v.severity.toUpperCase()}
-                        </span>
-                      </div>
-                      <p style={{ fontSize: '13px', margin: '6px 0 4px', color: '#444' }}>
-                        <strong>PII Type:</strong>{' '}
-                        <span style={{
-                          background: '#e9ecef', borderRadius: '4px',
-                          padding: '1px 8px', fontFamily: 'monospace', fontSize: '12px',
-                        }}>{v.pii_category}</span>
-                      </p>
-                      <p style={{ fontSize: '13px', margin: '4px 0', color: '#555' }}>
-                        <strong>Evidence:</strong> {v.evidence}
-                      </p>
-                      <p style={{ fontSize: '13px', margin: '4px 0', color: '#2d6a4f' }}>
-                        <strong>Fix:</strong> {v.recommendation}
-                      </p>
-                    </div>
-                  )
-                })}
-              </>
-            )}
-
-            {/* ── Sample code findings ────────────────────────────────── */}
-            {result.sample_findings && result.sample_findings.length > 0 && (
-              <>
-                <h3 style={{ marginTop: '1.5rem', marginBottom: '8px' }}>Sample Code Findings</h3>
-                {result.sample_findings.map((f, i) => (
-                  <div key={i} style={{
-                    background: '#e8f4fd', border: '1px solid #0d6efd',
-                    borderRadius: '6px', padding: '8px 14px', marginBottom: '6px',
-                  }}>
-                    <span style={{
-                      background: '#0d6efd', color: '#fff', borderRadius: '4px',
-                      padding: '1px 8px', fontFamily: 'monospace', fontSize: '12px', marginRight: '8px',
-                    }}>{f.pii_category}</span>
-                    <span style={{ fontSize: '13px', color: '#333' }}>
-                      {f.file_path} line {f.line_number}
-                    </span>
-                    <div style={{ fontSize: '12px', color: '#555', marginTop: '4px', fontFamily: 'monospace' }}>
-                      {f.raw_text}
-                    </div>
+            <div className="sa-steps-list">
+              {SCAN_STEPS.map((s, i) => (
+                <div
+                  key={i}
+                  className={`sa-step-row${i === stepIdx ? ' sa-step-active' : i < stepIdx ? ' sa-step-done' : ''}`}
+                >
+                  <div className="sa-step-indicator">
+                    {i < stepIdx
+                      ? <span className="sa-step-check">✓</span>
+                      : i === stepIdx
+                        ? <span className="sa-step-spin" />
+                        : null}
                   </div>
-                ))}
-              </>
-            )}
-
-            {/* ── Report buttons ──────────────────────────────────────── */}
-            {result.scan_id && (
-              <div style={{ marginTop: '1.2rem' }}>
-                <p style={{ fontSize: '12px', color: '#888', marginBottom: '10px' }}>
-                  Scan #{result.scan_id} saved ✓
-                </p>
-                <div style={{ display: 'flex', gap: '10px' }}>
-                  <button
-                    onClick={() => window.open('http://localhost:8000/report/' + result.scan_id, '_blank')}
-                    style={{
-                      padding: '8px 20px', fontSize: '13px', borderRadius: '6px',
-                      background: '#1a1a2e', color: '#fff', border: 'none', cursor: 'pointer',
-                    }}
-                  >View Full Report</button>
-                  <button
-                    onClick={() => window.open('http://localhost:8000/report/' + result.scan_id + '?format=pdf')}
-                    style={{
-                      padding: '8px 20px', fontSize: '13px', borderRadius: '6px',
-                      background: '#dc3545', color: '#fff', border: 'none', cursor: 'pointer',
-                    }}
-                  >Download PDF</button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── AI Executive Summary ────────────────────────────────────── */}
-        {(summaryLoading || aiSummary) && (
-          <div style={{
-            marginTop: '1.5rem', background: '#fff', border: '1px solid #dee2e6',
-            borderRadius: '10px', overflow: 'hidden',
-          }}>
-            <div style={{
-              background: 'linear-gradient(135deg, #1a1a2e, #16213e)',
-              padding: '12px 18px', display: 'flex', alignItems: 'center', gap: '10px',
-            }}>
-              <span style={{ fontSize: '18px' }}>🤖</span>
-              <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '15px' }}>
-                AI Compliance Summary
-              </span>
-              <span style={{
-                marginLeft: 'auto', background: 'rgba(255,255,255,0.15)',
-                color: '#ccc', fontSize: '11px', padding: '2px 8px', borderRadius: '99px',
-              }}>Powered by Gemini</span>
-            </div>
-            <div style={{ padding: '1rem 1.2rem', fontSize: '14px', lineHeight: 1.7, color: '#333' }}>
-              {summaryLoading
-                ? <span style={{ color: '#888' }}>⏳ Generating executive summary…</span>
-                : <span style={{ whiteSpace: 'pre-wrap' }}>{aiSummary}</span>
-              }
-            </div>
-          </div>
-        )}
-      </div>
-
-    {/* ── Floating chat button ────────────────────────────────────────── */}
-    {result?.scan_id && (
-      <>
-        <button
-          style={{
-            ...STYLE.chatBtn,
-            background: chatOpen ? '#dc3545' : '#1a1a2e',
-          }}
-          onClick={() => setChatOpen(o => !o)}
-          title="Ask the DPDP compliance advisor"
-        >
-          {chatOpen ? '✕' : '💬'}
-        </button>
-
-        {chatOpen && (
-          <div style={STYLE.chatPanel}>
-            {/* Header */}
-            <div style={STYLE.chatHeader}>
-              <span>🛡️ DPDP Compliance Advisor</span>
-              <span style={{ fontSize: '11px', color: '#aaa' }}>
-                Scan #{result.scan_id}
-              </span>
-            </div>
-
-            {/* Messages */}
-            <div style={STYLE.chatBody} ref={chatBodyRef}>
-              {chatMsgs.length === 0 && (
-                <div style={{ color: '#888', fontSize: '13px', textAlign: 'center', marginTop: '2rem' }}>
-                  <div style={{ fontSize: '28px', marginBottom: '8px' }}>🔍</div>
-                  Ask me anything about your compliance scan.<br />
-                  <span style={{ fontSize: '12px' }}>
-                    e.g. "Which violation should I fix first?" or<br />
-                    "What does Section 8(2) require?"
-                  </span>
-                </div>
-              )}
-
-              {chatMsgs.map((m, i) => (
-                <div key={i} style={m.role === 'user' ? STYLE.bubbleUser : STYLE.bubbleBot}>
-                  {m.content}
+                  <span className="sa-step-text">{s.label}</span>
                 </div>
               ))}
+            </div>
+          </div>
+        ) : (
+          /* ── Scan form ─────────────────── */
+          <div className="sa-wrap">
+            {/* Hero */}
+            <header className="sa-hero">
+              <div className="sa-hero-pill">
+                <span className="sa-hero-dot" />
+                DPDP Act 2023 · India
+              </div>
+              <h1 className="sa-hero-h1">
+                Scan your app.<br />
+                <em className="sa-hero-em">Know your risk.</em>
+              </h1>
+              <p className="sa-hero-p">
+                Drop in a GitHub repo and a privacy policy URL — get a full compliance
+                report in under 60 seconds.
+              </p>
+            </header>
 
-              {chatLoading && (
-                <div style={STYLE.bubbleTyping}>
-                  <span>⏳ Thinking…</span>
+            {/* Form card */}
+            <div className="sa-card">
+              {error && (
+                <div className="sa-err-banner">
+                  <AlertIcon />
+                  <span>{error}</span>
+                  <button className="sa-err-x" onClick={() => setError('')}>×</button>
                 </div>
               )}
+
+              <div className="sa-field">
+                <label className="sa-label">GitHub Repository URL</label>
+                <div className="sa-input-row">
+                  <span className="sa-icon"><GithubIcon /></span>
+                  <input
+                    type="url"
+                    className="sa-input"
+                    placeholder="https://github.com/org/repo"
+                    value={repo}
+                    onChange={e => setRepo(e.target.value)}
+                  />
+                </div>
+                <span className="sa-hint">Public or private — token grants access</span>
+              </div>
+
+              <div className="sa-field">
+                <label className="sa-label">Privacy Policy URL</label>
+                <div className="sa-input-row">
+                  <span className="sa-icon"><PolicyIcon /></span>
+                  <input
+                    type="url"
+                    className="sa-input"
+                    placeholder="https://yourapp.com/privacy"
+                    value={policy}
+                    onChange={e => setPolicy(e.target.value)}
+                  />
+                </div>
+                <span className="sa-hint">Must be publicly accessible</span>
+              </div>
+
+              <div className="sa-field">
+                <label className="sa-label">
+                  GitHub Personal Access Token
+                  <span className="sa-label-tag">🔒 never stored</span>
+                </label>
+                <div className="sa-input-row">
+                  <span className="sa-icon"><LockIcon /></span>
+                  <input
+                    type="password"
+                    className="sa-input"
+                    placeholder="ghp_••••••••••••••••••••••"
+                    value={token}
+                    onChange={e => setToken(e.target.value)}
+                  />
+                </div>
+                <span className="sa-hint">Used only for GitHub API — never stored or logged</span>
+              </div>
+
+              <button
+                className={`sa-submit${canScan ? '' : ' sa-submit-off'}`}
+                onClick={startScan}
+                disabled={!canScan}
+              >
+                <SearchIcon />
+                Start DPDP Scan
+              </button>
             </div>
 
-            {/* Input */}
-            <div style={STYLE.chatInputRow}>
-              <input
-                style={STYLE.chatInput}
-                placeholder="Ask a compliance question…"
-                value={chatInput}
-                onChange={e => setChatInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && sendChatMessage()}
-                disabled={chatLoading || !sessionId}
-              />
-              <button
-                style={{
-                  ...STYLE.chatSend,
-                  opacity: (chatLoading || !sessionId) ? 0.5 : 1,
-                }}
-                onClick={sendChatMessage}
-                disabled={chatLoading || !sessionId}
-              >Send</button>
+            {/* Feature chips */}
+            <div className="sa-chips">
+              {['PII Detection','Consent Gaps','SDK Checks','AI Summary','PDF Report','Compliance Chat'].map(c => (
+                <span key={c} className="sa-chip">{c}</span>
+              ))}
             </div>
           </div>
         )}
-      </>
-    )}
-  </>
-  )
+      </main>
+    </div>
+  );
 }

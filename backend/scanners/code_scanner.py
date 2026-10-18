@@ -23,6 +23,19 @@ from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.presidio_scanner import scan_text_with_presidio
 
+# Bare schema / field-declaration lines (Django ORM `field = models.XField(...)`,
+# SQLAlchemy `col = Column(...)`, dataclass/pydantic `field: Type = Field(...)`,
+# etc.) carry no literal PII *value* — only a field *name* and a type
+# constructor call. Pass 1's keyword regex already matches PII-sounding field
+# names on these lines; anything Pass 1 doesn't match here has nothing for an
+# NLP model to legitimately find, since there is no natural-language content
+# or literal data on the line at all. Running spaCy/Presidio NER on these
+# lines anyway produces demonstrated false positives — e.g. the bare
+# identifier "created_at" gets tagged LOCATION and "is_active" gets tagged
+# NRP, purely from the model treating snake_case/camelCase identifiers as
+# natural-language tokens. Skip Pass 2 for this line shape.
+_BARE_FIELD_DECL_RE = re.compile(r'^\s*[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*[A-Za-z_][\w.]*\s*\(')
+
 # ── PII regex patterns ────────────────────────────────────────────────────────
 
 PII_PATTERNS = {
@@ -158,13 +171,27 @@ def _verhoeff_validate(number: str) -> bool:
 
 
 def _validate_aadhaar(line: str) -> bool:
-    """Return True if the line contains a digit sequence that passes Verhoeff."""
+    """
+    Return True if the line's Aadhaar keyword match should stand.
+
+    - If the line contains a 12-digit candidate value, require at least one
+      candidate to pass the Verhoeff checksum. A keyword match whose only
+      numeric candidates all fail Verhoeff (timestamps, sequential IDs,
+      random digit strings) is rejected — this is the false-positive filter
+      described in Section IV-A of the paper.
+    - If the line has no 12-digit candidate at all (e.g. a bare field name
+      like `aadhaar_number = input_value`), there is nothing to checksum,
+      so the keyword match is conservatively allowed to stand.
+    """
+    found_candidate = False
     for match in AADHAAR_VALUE_RE.finditer(line):
+        found_candidate = True
         digits = re.sub(r'\s', '', match.group(1))
         if _verhoeff_validate(digits):
             return True
-    # No value-level match — allow keyword match to stand (conservative)
-    return True
+    # No value-level match at all — allow keyword match to stand (conservative).
+    # If candidates were found but every one failed Verhoeff, reject.
+    return not found_candidate
 
 
 # ── Module classifier ─────────────────────────────────────────────────────────
@@ -551,7 +578,9 @@ def _scan_single_file(
                     break  # one finding per line in pass 1
 
             # ── Pass 2: Presidio NER ──────────────────────────────────
-            if not matched and len(line.strip()) > 10:
+            # Skipped for bare field/schema declarations (no literal content
+            # for NER to analyze — see _BARE_FIELD_DECL_RE above).
+            if not matched and len(line.strip()) > 10 and not _BARE_FIELD_DECL_RE.match(line):
                 presidio_hits = scan_text_with_presidio(line)
                 for hit in presidio_hits:
                     if hit in PRESIDIO_MAP:
@@ -669,7 +698,7 @@ def scan_github_repo(
     # Each file is fetched from GitHub (I/O-bound) and scanned (CPU-bound)
     # concurrently.  PyGitHub is blocking/thread-safe for reads, so
     # ThreadPoolExecutor is the right primitive (no native async support).
-    max_workers = min(20, len(target_files) or 1)
+    max_workers = min(40, len(target_files) or 1)  # bumped: I/O-bound GitHub fetches benefit from more threads
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_file = {
             pool.submit(_scan_single_file, repo, f): f
