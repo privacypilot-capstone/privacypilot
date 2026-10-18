@@ -5,25 +5,12 @@ import ResultsDashboard from './components/ResultsDashboard';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-function calcCompliance(violations) {
-  const counts = { critical: 0, high: 0, medium: 0, low: 0 };
-  violations.forEach(v => { if (counts[v.severity] !== undefined) counts[v.severity]++; });
-  const score = Math.max(0, 100 - counts.critical * 15 - counts.high * 8 - counts.medium * 4 - counts.low * 1);
-  return {
-    score,
-    rating: score >= 80 ? 'Good' : score >= 60 ? 'Moderate' : score >= 40 ? 'Poor' : 'Critical Risk',
-    critical_count: counts.critical,
-    high_count: counts.high,
-    color: score >= 80 ? '#22c55e' : score >= 60 ? '#eab308' : score >= 40 ? '#f97316' : '#ef4444',
-  };
-}
-
 export default function ScanDetail() {
   const { id }    = useParams();
   const scanId    = parseInt(id, 10);
 
   const [scan,      setScan]      = useState(null);
-  const [violations,setViolations]= useState([]);
+  const [result,    setResult]    = useState(null);
   const [aiSummary, setAiSummary] = useState(null);
   const [aiLoading, setAiLoad]    = useState(false);
   const [loading,   setLoad]      = useState(true);
@@ -34,13 +21,13 @@ export default function ScanDetail() {
     setLoad(true);
     Promise.all([
       fetch(`${API}/scans`).then(r => r.json()),
-      fetch(`${API}/scans/${scanId}/violations`).then(r => r.json()),
+      fetch(`${API}/scans/${scanId}/result`).then(r => r.json()),
     ])
-      .then(([scans, viols]) => {
+      .then(([scans, res]) => {
         const found = scans.find(s => s.id === scanId);
         if (!found) throw new Error('Scan not found');
         setScan(found);
-        setViolations(viols);
+        setResult(res);
         setLoad(false);
         // Fetch AI summary
         setAiLoad(true);
@@ -107,8 +94,6 @@ export default function ScanDetail() {
     );
   }
 
-  const compliance = violations.length ? calcCompliance(violations) : { score: 100, rating: 'Good', color: '#22c55e' };
-
   return (
     <Layout>
       <div className="topbar">
@@ -171,10 +156,10 @@ export default function ScanDetail() {
 
         <ResultsDashboard
           scanId={scanId}
-          result={null}
-          violations={violations}
-          findings={[]}
-          compliance={compliance}
+          result={result}
+          violations={result?.violations || []}
+          findings={result?.sample_findings || []}
+          compliance={result?.compliance}
           aiSummary={aiSummary}
           aiLoading={aiLoading}
         />

@@ -114,7 +114,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           <div className="metric-icon" style={{ background: '#f0f9ff', fontSize: 20 }}>🔍</div>
           <div className="metric-label">PII Findings</div>
           <div className="metric-value" style={{ color: '#0ea5e9' }}>
-            {result?.code_findings_count ?? findings?.length ?? '—'}
+            {result?.findings_count ?? findings?.length ?? '—'}
           </div>
           <div className="metric-sub">in source code</div>
         </div>

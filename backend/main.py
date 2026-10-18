@@ -3,6 +3,7 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")  # explicit path
 
 import asyncio
+from datetime import timezone
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def _iso_utc(dt):
+    """Serialize a datetime as ISO-8601 with an explicit UTC offset.
+
+    Our DB columns store naive UTC datetimes (SQLAlchemy `DateTime` with
+    `default=datetime.utcnow`). `datetime.isoformat()` on a naive value
+    omits any timezone marker, so a client in a non-UTC timezone (e.g.
+    IST, UTC+5:30) parses it as *local* time instead of UTC — shifting
+    every timestamp by the client's own UTC offset. Attaching UTC
+    tzinfo before formatting makes the offset explicit for any client,
+    regardless of what timezone it's in.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 @app.on_event("startup")
 def startup():
@@ -125,7 +143,7 @@ def get_all_scans(db: Session = Depends(get_db)):
     return [{
         "id":               s.id,
         "repo_url":         s.repo_url,
-        "created_at":       s.created_at.isoformat(),
+        "created_at":       _iso_utc(s.created_at),
         "findings_count":   s.findings_count,
         "violations_count": s.violations_count,
         "gaps_count":       s.gaps_count,
@@ -550,7 +568,7 @@ def get_chat_history(session_id: int, db: Session = Depends(get_db)):
                 "id":         m.id,
                 "role":       m.role,
                 "content":    m.content,
-                "created_at": m.created_at.isoformat(),
+                "created_at": _iso_utc(m.created_at),
             }
             for m in messages
         ],
