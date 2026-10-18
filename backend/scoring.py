@@ -8,6 +8,7 @@
 PENALTY_CRITICAL = 0.20   # each critical violation retains 80% of what's left
 PENALTY_HIGH      = 0.10   # each high violation retains 90% of what's left
 PENALTY_MEDIUM     = 0.05  # each medium violation retains 95% of what's left
+PENALTY_LOW        = 0.02  # each low violation retains 98% of what's left
 
 
 def calculate_compliance_score(
@@ -21,6 +22,7 @@ def calculate_compliance_score(
         S = 100 × (1 − PENALTY_CRITICAL)^critical
                  × (1 − PENALTY_HIGH)^high
                  × (1 − PENALTY_MEDIUM)^medium
+                 × (1 − PENALTY_LOW)^low
 
     100 = fully compliant (zero violations).
     Approaches 0 as violations accumulate but never reaches it exactly, so
@@ -40,12 +42,14 @@ def calculate_compliance_score(
     critical_count = sum(1 for v in violations if v.severity == "critical")
     high_count     = sum(1 for v in violations if v.severity == "high")
     medium_count   = sum(1 for v in violations if v.severity == "medium")
+    low_count      = sum(1 for v in violations if v.severity == "low")
 
     score = (
         100
         * (1 - PENALTY_CRITICAL) ** critical_count
         * (1 - PENALTY_HIGH) ** high_count
         * (1 - PENALTY_MEDIUM) ** medium_count
+        * (1 - PENALTY_LOW) ** low_count
     )
     # Round for display, but not to 1 decimal place: the true value is
     # never exactly 0, yet round(x, 1) collapses anything below 0.05 to a
@@ -94,4 +98,5 @@ def calculate_compliance_score(
         "critical_count": critical_count,
         "high_count":     high_count,
         "medium_count":   medium_count,
+        "low_count":      low_count,
     }

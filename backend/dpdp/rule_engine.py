@@ -405,7 +405,15 @@ def run_dpdp_rules(
                 violations.append(DPDPViolation(
                     section="DPDP Rules 2025, Rule 3(b)(ii)",
                     title="Vague Purpose Statement",
-                    severity="medium",
+                    # "low", not "medium": this is a pure language-clarity
+                    # gap under the subordinate DPDP Rules 2025, not a gap
+                    # in the Act's own notice/consent/processor-contract
+                    # obligations. It is the mildest finding the rule
+                    # engine raises -- the purpose IS stated, disclosed,
+                    # and linked; it's merely worded ambiguously -- so it
+                    # sits below the "disclosed-SDK, contract unverifiable"
+                    # medium case rather than sharing its severity.
+                    severity="low",
                     pii_category=w.get("pii_category", "unknown"),
                     evidence=(
                         f"The privacy policy's purpose statement for "

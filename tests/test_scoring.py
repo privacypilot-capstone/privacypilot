@@ -27,6 +27,14 @@ dozens) and separately document -- rather than hide -- that any finite
 decimal rounding must eventually collapse an asymptotically-decaying
 value to a displayed 0.0 at a large enough count; that's an inherent
 property of rounding, not something to pretend is fully eliminated.
+
+A later pass wired up the "low" severity tier end-to-end (rule_engine.py's
+vagueness-warning branch now actually emits severity="low", instead of
+"low" existing only as unreachable report/frontend scaffolding alongside
+critical/high/medium, which this file's own _violations() helper already
+anticipated via its unused low= parameter). These tests now exercise that
+tier directly: it must be strictly gentler than every other severity, and
+its count must come back in the returned dict like the other three.
 """
 
 import sys
@@ -106,5 +114,29 @@ print("\n--- Documented limit: extreme (unrealistic) counts still round to 0.0 -
 extreme_score = calculate_compliance_score(_violations(critical=200), 0, 0)["score"]
 print(f"    200 critical violations -> score {extreme_score} "
       f"(expected to display as 0.0 -- true value is ~{100 * 0.8**200:.2e}, not literally zero)")
+
+# ── "low" severity tier: must be wired up, not dead code ─────────────────
+print("\n--- low_count is reported in the result dict ---")
+result_low = calculate_compliance_score(_violations(low=3), 0, 0)
+ok = "low_count" in result_low and result_low["low_count"] == 3
+print(f"  [{'PASS' if ok else 'FAIL'}]  low_count={result_low.get('low_count')} (expected 3)")
+all_pass &= ok
+
+print("\n--- a low violation must cost less than every other severity ---")
+base      = calculate_compliance_score(_violations(), 0, 0)["score"]
+one_low   = calculate_compliance_score(_violations(low=1), 0, 0)["score"]
+one_med   = calculate_compliance_score(_violations(medium=1), 0, 0)["score"]
+one_high  = calculate_compliance_score(_violations(high=1), 0, 0)["score"]
+one_crit  = calculate_compliance_score(_violations(critical=1), 0, 0)["score"]
+ok = base > one_low > one_med > one_high > one_crit
+print(f"  [{'PASS' if ok else 'FAIL'}]  "
+      f"none={base}  low={one_low}  medium={one_med}  high={one_high}  critical={one_crit}")
+all_pass &= ok
+
+print("\n--- low violations still strictly decrease the score and stay distinguishable ---")
+low_scores = [calculate_compliance_score(_violations(low=n), 0, 0)["score"] for n in (0, 1, 5, 10, 20)]
+ok = all(low_scores[i] > low_scores[i + 1] for i in range(len(low_scores) - 1))
+print(f"  [{'PASS' if ok else 'FAIL'}]  low-only scores strictly decreasing: {low_scores}")
+all_pass &= ok
 
 print(f"\n{'SCORING: PASS' if all_pass else 'SCORING: FAIL -- check failures above'}")
