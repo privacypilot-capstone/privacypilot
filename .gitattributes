@@ -1,0 +1,15 @@
+# Normalize line endings to LF in the repo regardless of what OS/editor
+# checks a file out or saves it — without this, Windows tools (editors,
+# other AI assistants, etc.) silently re-save files as CRLF, which then
+# shows up as a full-file diff with zero actual content change.
+* text=auto eol=lf
+
+# Binary files git should never try to diff or convert line endings on.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.svg binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.db binary
