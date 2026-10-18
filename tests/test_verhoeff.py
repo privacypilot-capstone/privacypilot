@@ -1,110 +1,112 @@
 """
 Phase 1: Verhoeff Checksum Validation
-Tests that the Aadhaar validation algorithm correctly
-accepts valid-format numbers and rejects invalid ones.
+Tests that the ACTUAL production Aadhaar validation (presidio_scanner.py's
+verhoeff_checksum_valid + _extract_valid_aadhaar, and code_scanner.py's
+_validate_aadhaar which imports the same shared function) correctly accepts
+valid-format numbers and rejects invalid ones.
+
+This file previously defined its own standalone copy of the Verhoeff tables
+and never imported backend/scanners/*.py at all -- it could pass forever
+while the real implementation had a completely different bug, or diverged
+from it entirely. It now imports the real functions, so a regression in the
+actual scanner shows up here.
 
 PASS criteria:
-- All 5 valid tests return True or "structurally valid"
-- All 5 reject tests return False
-- Sequential ID rejection works
+- All "should reject" structural cases are rejected
+- A genuinely Verhoeff-valid Aadhaar number is accepted
+- A tampered (checksum-fail) number is rejected
+- The scan_text_with_presidio() entry point (the one code_scanner.py Pass 2
+  actually calls) does NOT flag a shape-only, checksum-failing 12-digit
+  value as AADHAAR, and DOES flag a genuinely valid one
+- code_scanner.py's own _validate_aadhaar (Pass 1 path) agrees
 """
 
-# ── Verhoeff lookup tables ────────────────────────────────────────────────
-D_TABLE = [
-    [0,1,2,3,4,5,6,7,8,9],
-    [1,2,3,4,0,6,7,8,9,5],
-    [2,3,4,0,1,7,8,9,5,6],
-    [3,4,0,1,2,8,9,5,6,7],
-    [4,0,1,2,3,9,5,6,7,8],
-    [5,9,8,7,6,0,4,3,2,1],
-    [6,5,9,8,7,1,0,4,3,2],
-    [7,6,5,9,8,2,1,0,4,3],
-    [8,7,6,5,9,3,2,1,0,4],
-    [9,8,7,6,5,4,3,2,1,0],
-]
-P_TABLE = [
-    [0,1,2,3,4,5,6,7,8,9],
-    [1,5,7,6,2,8,3,0,9,4],
-    [5,8,0,3,7,9,6,1,4,2],
-    [8,9,1,6,0,4,3,5,2,7],
-    [9,4,5,3,1,2,6,8,7,0],
-    [4,2,8,6,5,7,3,9,0,1],
-    [2,7,9,3,8,0,6,4,1,5],
-    [7,0,4,6,9,1,3,2,5,8],
-]
-INV_TABLE = [0,4,3,2,1,9,8,7,6,5]
+import sys
+import types
 
-def verhoeff_validate(number: str) -> bool:
-    c = 0
-    for i, ch in enumerate(reversed(number)):
-        c = D_TABLE[c][P_TABLE[i % 8][int(ch)]]
-    return c == 0
+# presidio_analyzer (+ its spaCy-backed NLP engine) is a heavy optional
+# dependency of the NER fallback path. The Verhoeff logic under test here
+# never touches it, so it's stubbed rather than required just to run this
+# test -- scan_text_with_presidio() already handles the NER engine failing
+# to load (see its try/except), so stubbing it doesn't change what we're
+# validating.
+if "presidio_analyzer" not in sys.modules:
+    _fake_pa = types.ModuleType("presidio_analyzer")
+    _fake_pa.AnalyzerEngine = object
+    _fake_nlp = types.ModuleType("presidio_analyzer.nlp_engine")
+    _fake_nlp.NlpEngineProvider = object
+    sys.modules["presidio_analyzer"] = _fake_pa
+    sys.modules["presidio_analyzer.nlp_engine"] = _fake_nlp
 
-def is_valid_aadhaar(raw: str) -> bool:
-    digits = raw.replace(" ", "").replace("-", "")
-    if len(digits) != 12:        return False
-    if not digits.isdigit():     return False
-    if digits[0] not in "23456789": return False
-    return verhoeff_validate(digits)
+sys.path.insert(0, "/app")  # backend/ is mounted at /app in the Docker image
 
-# ── Tests ─────────────────────────────────────────────────────────────────
+from scanners.presidio_scanner import verhoeff_checksum_valid, scan_text_with_presidio
+from scanners.code_scanner import _validate_aadhaar
+
 print("=" * 55)
-print("PHASE 1: Verhoeff Checksum")
+print("PHASE 1: Verhoeff Checksum (against real production code)")
 print("=" * 55)
 
-# These all start with 2-9 and are structurally Aadhaar-format
-# Whether they pass Verhoeff depends on the actual check digit
-# Test the rules that are definitely deterministic:
+all_pass = True
 
 SHOULD_REJECT = [
-    ("123456789012", "Starts with 1 — invalid per UIDAI"),
-    ("000000000000", "Starts with 0 — invalid"),
-    ("12345",        "Too short"),
-    ("12345678901234", "Too long"),
-    ("ABCDEFGHIJKL", "Non-numeric"),
+    ("order_id = 123456789012",   "Starts with 1 -- invalid per UIDAI"),
+    ("code = 000000000000",       "Starts with 0 -- invalid"),
+    ("pin = 12345",                "Too short"),
+    ("ref = 12345678901234",       "Too long"),
+    ("id = ABCDEFGHIJKL",          "Non-numeric"),
 ]
 
-SHOULD_PASS_STRUCTURE = [
-    ("2000 0000 0000", "Valid format with spaces"),
-    ("3000-0000-0000", "Valid format with dashes"),
-    ("234567890000",   "Valid format no separator"),
-    ("999999999999",   "Starts with 9 — valid structure"),
-    ("212345678909",   "Valid UIDAI format"),
-]
+print("\n--- Should REJECT (via scan_text_with_presidio) ---")
+for line, reason in SHOULD_REJECT:
+    hits = scan_text_with_presidio(line)
+    result = "AADHAAR" in hits
+    status = "PASS" if not result else "FAIL"
+    if result:
+        all_pass = False
+    print(f"  [{status}]  '{line}'  ({reason})")
 
-print("\n--- Should REJECT (structural failures) ---")
-all_pass = True
-for number, reason in SHOULD_REJECT:
-    result = is_valid_aadhaar(number)
-    status = "✓ PASS" if not result else "✗ FAIL"
-    if result: all_pass = False
-    print(f"  {status}  '{number}'  ({reason})")
+VALID_AADHAAR = "234567890124"
+TAMPERED      = "234567890125"
 
-print("\n--- Should PASS structure check ---")
-for number, reason in SHOULD_PASS_STRUCTURE:
-    result = is_valid_aadhaar(number)
-    # For structure-valid numbers, Verhoeff may still reject (correct behaviour)
-    # What matters is they don't fail on structural grounds
-    digits = number.replace(" ","").replace("-","")
-    structural_ok = (
-        len(digits) == 12 and 
-        digits.isdigit() and 
-        digits[0] in "23456789"
-    )
-    status = "✓ PASS" if structural_ok else "✗ FAIL"
-    if not structural_ok: all_pass = False
-    verhoeff = "Verhoeff: OK" if result else "Verhoeff: rejected"
-    print(f"  {status}  '{number}'  — {verhoeff}")
+print("\n--- Verhoeff checksum itself ---")
+ok = verhoeff_checksum_valid(VALID_AADHAAR) is True
+print(f"  [{'PASS' if ok else 'FAIL'}]  valid number {VALID_AADHAAR} accepted")
+all_pass &= ok
 
-print("\n--- False positive reduction test ---")
-false_positives = [
-    "20241015123456",  # Timestamp — 14 digits, too long → rejected
-    "20241015",        # Short timestamp → rejected
-    "000123456789",    # Starts with 0 → rejected
-]
-for fp in false_positives:
-    result = is_valid_aadhaar(fp)
-    status = "✓ PASS (correctly rejected)" if not result else "✗ FAIL (false positive)"
-    print(f"  {status}  '{fp}'")
+ok = verhoeff_checksum_valid(TAMPERED) is False
+print(f"  [{'PASS' if ok else 'FAIL'}]  tampered number {TAMPERED} rejected")
+all_pass &= ok
 
-print(f"\n{'PHASE 1: PASS' if all_pass else 'PHASE 1: FAIL — check failures above'}")
+print("\n--- False positive reduction: shape matches, checksum fails ---")
+line_fp = f"order_timestamp = {TAMPERED}"
+hits = scan_text_with_presidio(line_fp)
+result = "AADHAAR" in hits
+status = "PASS (correctly rejected)" if not result else "FAIL (false positive)"
+if result:
+    all_pass = False
+print(f"  [{status}]  '{line_fp}'")
+
+print("\n--- True positive: genuinely valid Aadhaar value still detected ---")
+line_tp = f"aadhaar_value = {VALID_AADHAAR}"
+hits = scan_text_with_presidio(line_tp)
+result = "AADHAAR" in hits
+status = "PASS" if result else "FAIL (missed a real Aadhaar number)"
+if not result:
+    all_pass = False
+print(f"  [{status}]  '{line_tp}'")
+
+print("\n--- code_scanner.py Pass 1 path agrees (shared implementation) ---")
+ok = _validate_aadhaar(f"aadhaar_number = '{VALID_AADHAAR}'") is True
+print(f"  [{'PASS' if ok else 'FAIL'}]  valid value -> keyword match stands")
+all_pass &= ok
+
+ok = _validate_aadhaar(f"aadhaar_number = '{TAMPERED}'") is False
+print(f"  [{'PASS' if ok else 'FAIL'}]  tampered value -> keyword match rejected")
+all_pass &= ok
+
+ok = _validate_aadhaar("aadhaar_number = input_value") is True
+print(f"  [{'PASS' if ok else 'FAIL'}]  bare field name, no value -> conservatively accepted")
+all_pass &= ok
+
+print(f"\n{'PHASE 1: PASS' if all_pass else 'PHASE 1: FAIL -- check failures above'}")

@@ -9,6 +9,66 @@ INDIA_PATTERNS = {
     "PHONE":   r"\b(?:\+91|0)?[6-9][0-9]{9}\b",
 }
 
+# ── Verhoeff checksum for Aadhaar validation ──────────────────────────────────
+# Aadhaar numbers are 12-digit UIDAI identifiers whose last digit is a
+# Verhoeff check digit. A bare 12-digit regex alone has no way to tell a real
+# Aadhaar number apart from any other 12-digit sequence that happens to start
+# with 2-9 (a timestamp, an order ID, a padded account number, etc.) — the
+# Verhoeff checksum is the one structural signal that actually distinguishes
+# them, so every Aadhaar-shaped match is run through it before being accepted.
+#
+# This is the single source of truth for the algorithm: code_scanner.py's
+# own regex-based Aadhaar check imports `verhoeff_checksum_valid` from here
+# rather than keeping a second copy of these tables, so the two scanning
+# passes can never silently drift apart on what counts as a valid number.
+_VERHOEFF_D = [
+    [0,1,2,3,4,5,6,7,8,9],
+    [1,2,3,4,0,6,7,8,9,5],
+    [2,3,4,0,1,7,8,9,5,6],
+    [3,4,0,1,2,8,9,5,6,7],
+    [4,0,1,2,3,9,5,6,7,8],
+    [5,9,8,7,6,0,4,3,2,1],
+    [6,5,9,8,7,1,0,4,3,2],
+    [7,6,5,9,8,2,1,0,4,3],
+    [8,7,6,5,9,3,2,1,0,4],
+    [9,8,7,6,5,4,3,2,1,0],
+]
+_VERHOEFF_P = [
+    [0,1,2,3,4,5,6,7,8,9],
+    [1,5,7,6,2,8,3,0,9,4],
+    [5,8,0,3,7,9,6,1,4,2],
+    [8,9,1,6,0,4,3,5,2,7],
+    [9,4,5,3,1,2,6,8,7,0],
+    [4,2,8,6,5,7,3,9,0,1],
+    [2,7,9,3,8,0,6,4,1,5],
+    [7,0,4,6,9,1,3,2,5,8],
+]
+
+
+def verhoeff_checksum_valid(digits: str) -> bool:
+    """
+    Return True if `digits` (a 12-character numeric string, no spaces/dashes)
+    passes the Verhoeff checksum used by UIDAI for Aadhaar numbers.
+    """
+    seq = [int(d) for d in reversed(digits)]
+    c = 0
+    for i, d in enumerate(seq):
+        c = _VERHOEFF_D[c][_VERHOEFF_P[i % 8][d]]
+    return c == 0
+
+
+def _extract_valid_aadhaar(text: str) -> bool:
+    """
+    Return True if `text` contains at least one 12-digit candidate matching
+    the Aadhaar shape AND passing the Verhoeff checksum. A shape-only match
+    (e.g. a timestamp or order ID that happens to start with 2-9) is rejected.
+    """
+    for m in re.finditer(INDIA_PATTERNS["AADHAAR"], text):
+        digits = re.sub(r'\s', '', m.group(0))
+        if len(digits) == 12 and verhoeff_checksum_valid(digits):
+            return True
+    return False
+
 # Lazy-load analyzer so it doesn't crash if spacy not ready
 _analyzer = None
 
@@ -80,7 +140,13 @@ def scan_text_with_presidio(text: str) -> list:
 
     # India-specific regex first
     for label, pattern in INDIA_PATTERNS.items():
-        if re.search(pattern, text):
+        if label == "AADHAAR":
+            # Shape alone isn't enough for Aadhaar — require a Verhoeff pass
+            # (see _extract_valid_aadhaar above). PAN/PHONE have no public
+            # checksum standard, so they stay shape-only like before.
+            if _extract_valid_aadhaar(text):
+                found.append(label)
+        elif re.search(pattern, text):
             found.append(label)
 
     # Presidio NER

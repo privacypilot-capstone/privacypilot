@@ -21,7 +21,7 @@ import concurrent.futures
 import re
 from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
-from scanners.presidio_scanner import scan_text_with_presidio
+from scanners.presidio_scanner import scan_text_with_presidio, verhoeff_checksum_valid
 
 # Bare schema / field-declaration lines (Django ORM `field = models.XField(...)`,
 # SQLAlchemy `col = Column(...)`, dataclass/pydantic `field: Type = Field(...)`,
@@ -131,44 +131,11 @@ PRESIDIO_MAP = {
 }
 
 
-# ── Verhoeff checksum for Aadhaar validation ──────────────────────────────────
-# Aadhaar uses the Verhoeff algorithm (d5 * p[i][c]).
-# A regex match alone can produce false positives; checksum filters them.
-
-_VERHOEFF_D = [
-    [0,1,2,3,4,5,6,7,8,9],
-    [1,2,3,4,0,6,7,8,9,5],
-    [2,3,4,0,1,7,8,9,5,6],
-    [3,4,0,1,2,8,9,5,6,7],
-    [4,0,1,2,3,9,5,6,7,8],
-    [5,9,8,7,6,0,4,3,2,1],
-    [6,5,9,8,7,1,0,4,3,2],
-    [7,6,5,9,8,2,1,0,4,3],
-    [8,7,6,5,9,3,2,1,0,4],
-    [9,8,7,6,5,4,3,2,1,0],
-]
-_VERHOEFF_P = [
-    [0,1,2,3,4,5,6,7,8,9],
-    [1,5,7,6,2,8,3,0,9,4],
-    [5,8,0,3,7,9,6,1,4,2],
-    [8,9,1,6,0,4,3,5,2,7],
-    [9,4,5,3,1,2,6,8,7,0],
-    [4,2,8,6,5,7,3,9,0,1],
-    [2,7,9,3,8,0,6,4,1,5],
-    [7,0,4,6,9,1,3,2,5,8],
-]
-_VERHOEFF_INV = [0,4,3,2,1,9,8,7,6,5]
-
-
-def _verhoeff_validate(number: str) -> bool:
-    """Return True if `number` passes the Verhoeff checksum (valid Aadhaar digit sequence)."""
-    digits = [int(d) for d in reversed(number)]
-    c = 0
-    for i, d in enumerate(digits):
-        p = _VERHOEFF_P[i % 8][d]
-        c = _VERHOEFF_D[c][p]
-    return c == 0
-
+# ── Aadhaar value validation ──────────────────────────────────────────────────
+# The Verhoeff checksum itself (and its lookup tables) lives in
+# presidio_scanner.py — imported above as verhoeff_checksum_valid — so this
+# file and the Presidio-NER path can never silently drift apart on what
+# counts as a structurally valid Aadhaar number.
 
 def _validate_aadhaar(line: str) -> bool:
     """
@@ -187,7 +154,7 @@ def _validate_aadhaar(line: str) -> bool:
     for match in AADHAAR_VALUE_RE.finditer(line):
         found_candidate = True
         digits = re.sub(r'\s', '', match.group(1))
-        if _verhoeff_validate(digits):
+        if verhoeff_checksum_valid(digits):
             return True
     # No value-level match at all — allow keyword match to stand (conservative).
     # If candidates were found but every one failed Verhoeff, reject.
