@@ -71,8 +71,8 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
         with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
             _code_fut   = _pool.submit(scan_github_repo, repo_url, token)
             _policy_fut = _pool.submit(parse_privacy_policy, policy_url, token)
-            code_findings, usage_map                      = _code_fut.result()
-            policy_claims, purpose_map, vagueness_warnings = _policy_fut.result()
+            code_findings, usage_map                                       = _code_fut.result()
+            policy_claims, purpose_map, vagueness_warnings, disclosed_sdks = _policy_fut.result()
 
         print(f"[task] Scan {scan_id} — {len(code_findings)} code findings")
         print(f"[task] Scan {scan_id} — {len(policy_claims)} policy claims")
@@ -90,6 +90,7 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
             usage_map=usage_map,
             purpose_map=purpose_map,
             vagueness_warnings=vagueness_warnings,
+            disclosed_sdks=disclosed_sdks,
         )
 
         # ── Step 5: Compliance score ──────────────────────────────────────────

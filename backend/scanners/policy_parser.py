@@ -17,6 +17,7 @@ import socket
 import requests
 from urllib.parse import urlparse
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
+from dpdp.rule_engine import ALL_SDK_SINKS
 
 # ── Security: URL Validation ──────────────────────────────────────────────────
 
@@ -739,12 +740,65 @@ def _pass2_extract_purposes(
     return purpose_map, vagueness_warnings
 
 
+# ── Pass 3: disclosed third-party extraction ──────────────────────────────────
+# Rule 2 ("Third-Party Transmission") in the rule engine previously flagged
+# every PII+SDK co-location in code as "undisclosed" (Section 5) regardless
+# of what the privacy policy actually says — it never consulted the policy
+# at all. This pass closes that gap: if the policy names a known SDK/
+# processor in the same sentence as a PII category, that category's sharing
+# with that SDK is treated as disclosed, and the rule engine downgrades its
+# finding instead of repeating a false "undisclosed" claim.
+#
+# Simplifying assumption: this is same-sentence co-occurrence, not negation-
+# aware (a sentence saying "we do NOT share data with Firebase" would also
+# count as disclosure of Firebase). That is intentional, not a bug: Section
+# 5's notice requirement is about informing the user which named parties are
+# in play, and naming a processor — in any polarity — already does that.
+# Negation handling is listed as a limitation, not attempted here.
+
+def _pass3_extract_disclosed_sdks(
+    full_text_lower: str,
+    policy_pii_categories: set[PIICategory],
+) -> dict[PIICategory, set[str]]:
+    """
+    Returns {PIICategory → set[sdk_name]} for every (category, SDK) pair
+    that co-occurs in the same sentence of the privacy policy — i.e. SDKs
+    the policy already names as a recipient of that PII category.
+    """
+    disclosed: dict[PIICategory, set[str]] = {}
+    if not policy_pii_categories:
+        return disclosed
+
+    pii_to_kw: dict[PIICategory, list[str]] = {}
+    for kw, cat in POLICY_PII_MAP.items():
+        pii_to_kw.setdefault(cat, []).append(kw)
+
+    sentences = re.split(r'[.!?;]', full_text_lower)
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if len(sentence) < 10:
+            continue
+
+        sdks_in_sentence = {sdk for sdk in ALL_SDK_SINKS if sdk in sentence}
+        if not sdks_in_sentence:
+            continue
+
+        for cat in policy_pii_categories:
+            keywords_for_cat = pii_to_kw.get(cat, [])
+            if any(kw in sentence for kw in keywords_for_cat):
+                disclosed.setdefault(cat, set()).update(sdks_in_sentence)
+
+    if disclosed:
+        print(f"[policy] disclosed_sdks: { {k.value: v for k, v in disclosed.items()} }")
+    return disclosed
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def parse_privacy_policy(
     policy_url: str,
     github_token: str | None = None,
-) -> tuple[list[DataFlowObject], dict[PIICategory, set[str]], list[dict]]:
+) -> tuple[list[DataFlowObject], dict[PIICategory, set[str]], list[dict], dict[PIICategory, set[str]]]:
     """
     Fetch and analyse a privacy policy URL.
 
@@ -753,6 +807,8 @@ def parse_privacy_policy(
     policy_claims      : list[DataFlowObject]  — PII types found in policy
     purpose_map        : dict[PIICategory, set[str]]  — what purposes are stated
     vagueness_warnings : list[dict]  — sentences with ambiguous purpose (margin < 0.08)
+    disclosed_sdks      : dict[PIICategory, set[str]]  — SDKs the policy already
+                          names as a recipient of that PII category (Pass 3)
     """
     # Security: validate URL before any HTTP request
     validate_policy_url(policy_url)
@@ -770,4 +826,7 @@ def parse_privacy_policy(
         full_text_lower, seen_categories
     )
 
-    return findings, purpose_map, vagueness_warnings
+    # ── Pass 3: Disclosed third-party extraction ──────────────────────────
+    disclosed_sdks = _pass3_extract_disclosed_sdks(full_text_lower, seen_categories)
+
+    return findings, purpose_map, vagueness_warnings, disclosed_sdks

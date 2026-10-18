@@ -127,6 +127,7 @@ def run_dpdp_rules(
     usage_map: dict | None = None,
     purpose_map: dict | None = None,
     vagueness_warnings: list | None = None,
+    disclosed_sdks: dict | None = None,
 ) -> list:
     """
     Parameters
@@ -140,6 +141,11 @@ def run_dpdp_rules(
                          (populated after Step 5 — purpose extraction)
     vagueness_warnings : list[dict] from policy_parser vagueness detector
                          (populated after Step 5)
+    disclosed_sdks     : {PIICategory → set[str]} SDKs the privacy policy already
+                         names as a recipient of that PII category (policy_parser
+                         Pass 3). Used by Rule 2 so it stops treating every
+                         PII+SDK pairing as "undisclosed" when the policy already
+                         discloses it.
 
     Returns
     -------
@@ -147,8 +153,6 @@ def run_dpdp_rules(
     """
     violations = []
     seen = set()
-
-    policy_pii_types = {f.pii_category for f in policy_claims}
 
     # Build a location index: {PIICategory → [(file_path, line_number), ...]}
     # Used by Rule 3 to cite concrete evidence locations in violation messages.
@@ -244,34 +248,74 @@ def run_dpdp_rules(
         if sdk_lower in ALL_SDK_SINKS or sdk_lower in HTTP_SINKS or sdk_lower in QUEUE_SINKS:
             is_sensitive = cat in SENSITIVE_CATEGORIES
 
-            # All SDK transmissions: undisclosed third-party sharing (Section 5)
+            # Has the privacy policy already named this SDK as a recipient
+            # of this PII category (policy_parser Pass 3)? Only the named-
+            # company sink lists (ALL_SDK_SINKS) are checkable this way —
+            # HTTP_SINKS/QUEUE_SINKS are generic code patterns ('requests.post',
+            # 'kafka'), not names a policy would plausibly disclose by string
+            # match, so they always fall through to the undisclosed branch.
+            _disclosed_set = (disclosed_sdks or {}).get(cat, set())
+            is_disclosed = (
+                sdk_lower in ALL_SDK_SINKS
+                and sdk_lower in {s.lower() for s in _disclosed_set}
+            )
+
             key = f"r2_sdk_{cat.value}_{sdk}"
             if key not in seen:
                 seen.add(key)
-                severity = "critical" if is_sensitive else "high"
-                violations.append(DPDPViolation(
-                    section="Section 5 / Section 8(2)",
-                    title="Third-Party Transmission — Undisclosed Data Processor",
-                    severity=severity,
-                    pii_category=cat.value,
-                    evidence=(
-                        f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
-                        f"Section 5 requires the notice to identify third parties "
-                        f"that will receive personal data. Section 8(2) requires a "
-                        f"contract with every data processor that binds them to the "
-                        f"same DPDP obligations as the data fiduciary."
-                    ),
-                    recommendation=(
-                        f"1. Disclose '{sdk}' as a data processor in the privacy policy. "
-                        f"2. Execute a Data Processing Agreement with '{sdk}' covering "
-                        f"purpose, retention, and security obligations. "
-                        f"3. For sensitive category '{cat.value}', obtain separate "
-                        f"explicit consent for this third-party share."
-                        if is_sensitive else
-                        f"1. Disclose '{sdk}' as a data processor in the privacy policy. "
-                        f"2. Execute a Data Processing Agreement with '{sdk}'."
-                    ),
-                ))
+                if is_disclosed:
+                    # Section 5's notice requirement is satisfied — the policy
+                    # already names '{sdk}' as a recipient of this data. What
+                    # remains unverifiable from the policy text or source code
+                    # alone is Section 8(2): whether an actual processor
+                    # contract exists. Flag that narrower gap instead of
+                    # repeating a false "undisclosed" claim.
+                    violations.append(DPDPViolation(
+                        section="Section 8(2)",
+                        title="Third-Party Transmission — Processor Contract Unverified",
+                        severity="medium",
+                        pii_category=cat.value,
+                        evidence=(
+                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
+                            f"The privacy policy already discloses '{sdk}' as a "
+                            f"recipient of this data, satisfying Section 5's notice "
+                            f"requirement. Section 8(2) separately requires a "
+                            f"data-processing agreement binding '{sdk}' to the same "
+                            f"DPDP obligations — this cannot be verified from the "
+                            f"policy text or source code alone."
+                        ),
+                        recommendation=(
+                            f"Confirm a signed Data Processing Agreement with '{sdk}' "
+                            f"is in place covering purpose, retention, and security "
+                            f"obligations."
+                        ),
+                    ))
+                else:
+                    # All SDK transmissions: undisclosed third-party sharing (Section 5)
+                    severity = "critical" if is_sensitive else "high"
+                    violations.append(DPDPViolation(
+                        section="Section 5 / Section 8(2)",
+                        title="Third-Party Transmission — Undisclosed Data Processor",
+                        severity=severity,
+                        pii_category=cat.value,
+                        evidence=(
+                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
+                            f"Section 5 requires the notice to identify third parties "
+                            f"that will receive personal data. Section 8(2) requires a "
+                            f"contract with every data processor that binds them to the "
+                            f"same DPDP obligations as the data fiduciary."
+                        ),
+                        recommendation=(
+                            f"1. Disclose '{sdk}' as a data processor in the privacy policy. "
+                            f"2. Execute a Data Processing Agreement with '{sdk}' covering "
+                            f"purpose, retention, and security obligations. "
+                            f"3. For sensitive category '{cat.value}', obtain separate "
+                            f"explicit consent for this third-party share."
+                            if is_sensitive else
+                            f"1. Disclose '{sdk}' as a data processor in the privacy policy. "
+                            f"2. Execute a Data Processing Agreement with '{sdk}'."
+                        ),
+                    ))
 
     # ── Rule 3: Purpose–PII Linkage — Section 6(1) ──────────────────────────
     # Cross-reference usage_map (how code uses each PII category, e.g. 'analytics')
