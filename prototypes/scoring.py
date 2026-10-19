@@ -38,7 +38,10 @@ its count must come back in the returned dict like the other three.
 """
 
 import sys
-sys.path.insert(0, "/app")
+from pathlib import Path
+# backend/ relative to this file, so the script runs from any checkout
+# (it used to work only inside Docker, where backend/ is mounted at /app)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from scoring import calculate_compliance_score
 

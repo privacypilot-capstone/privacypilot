@@ -31,7 +31,10 @@ PASS criteria:
 import re
 import sys
 
-sys.path.insert(0, "/app")  # backend/ is mounted at /app in the Docker image
+from pathlib import Path
+# backend/ relative to this file, so the script runs from any checkout
+# (it used to work only inside Docker, where backend/ is mounted at /app)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from scanners.policy_parser import _pass1_extract_pii
 from models.dataflow import PIICategory

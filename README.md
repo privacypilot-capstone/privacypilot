@@ -1,16 +1,43 @@
-# React + Vite
+# PrivacyPilot
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+DPDP Act 2023 compliance engine. It scans a GitHub repository's source code and its privacy policy, then reports where the code's handling of personal data is not covered by the policy.
 
-Currently, two official plugins are available:
+## Checks
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+| Check | Provision | Implemented in |
+| --- | --- | --- |
+| Notice Gap — PII in code but not in the policy | Section 5 / Section 6(1) | `backend/dpdp/rule_engine.py` |
+| Third-Party Transmission — PII sent to an SDK, HTTP call or queue | Section 5 / Section 8(2) | `rule_engine.py`, `scanners/sinks.py` |
+| PII in Logger Output | Section 8(5) | `rule_engine.py`, `scanners/sinks.py` |
+| Purpose–PII Linkage — code use not covered by a stated purpose | Section 6(1) | `rule_engine.py`, `scanners/code_scanner.py`, `scanners/policy_parser.py` |
+| Vague Purpose Statement | DPDP Rules 2025, Rule 3(b)(ii) | `scanners/policy_parser.py`, `rule_engine.py` |
 
-## React Compiler
+Severity tiers (Aadhaar, PAN, health, financial and biometric data are treated as "critical") are a design choice of this project; the Act itself does not define a sensitive-data class. This tool is a research prototype and does not give legal advice.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Setup
 
-## Expanding the Oxlint configuration
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate          # Windows  (source .venv/bin/activate on macOS/Linux)
+pip install -r requirements.txt  # includes celery, sentence-transformers, reportlab and en_core_web_lg
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+Check what is installed: `GET http://localhost:8000/health` lists every optional component and reports `"degraded"` if any is missing (for example, without `sentence-transformers` the Rule 3(b)(ii) check cannot run).
+
+Run the stack:
+
+```bash
+docker compose up               # backend, worker, Postgres, Redis
+cd frontend && npm install && npm run dev
+```
+
+## Tests
+
+```bash
+pytest -q tests
+```
+
+`tests/test_production.py` imports and runs the real backend modules; each test is tagged with the audit defect it guards. Add a test there for every new feature or fix.
+
+`prototypes/` holds the early feasibility scripts used to check whether each planned strategy would work. They carry their own copies of the logic, are not part of the test suite, and are kept for reference only.

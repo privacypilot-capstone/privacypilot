@@ -11,6 +11,13 @@ PENALTY_MEDIUM     = 0.05  # each medium violation retains 95% of what's left
 PENALTY_LOW        = 0.02  # each low violation retains 98% of what's left
 
 
+def format_score(score: float) -> str:
+    """1 decimal normally; 4 decimals for tiny non-zero scores."""
+    if 0 < score < 0.1:
+        return f"{score:.4f}"
+    return f"{score:.1f}"
+
+
 def calculate_compliance_score(
     violations: list,
     code_findings_count: int,
@@ -92,6 +99,11 @@ def calculate_compliance_score(
 
     return {
         "score":  score,
+        # Human-facing form of the score. `score` keeps 4 decimals so repos
+        # stay distinguishable; reports and the dashboard show 1 decimal
+        # (e.g. "43.0" rather than "43.0467"), switching to 4 only when the
+        # score is below 0.1 so a near-zero score never displays as "0.0".
+        "score_display": format_score(score),
         "rating": rating,
         "color":  color,
         "total_violations":  len(violations),

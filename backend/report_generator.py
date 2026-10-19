@@ -46,7 +46,7 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
         """
 
     score_color = compliance.get("color", "#333")
-    score       = compliance.get("score", 0)
+    score       = compliance.get("score_display", compliance.get("score", 0))
     rating      = compliance.get("rating", "Unknown")
     critical    = compliance.get("critical_count", 0)
     high        = compliance.get("high_count", 0)
@@ -235,7 +235,7 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
               border-radius:8px;font-size:11px;color:#666;border:1px solid #ffc107">
     <strong>Disclaimer:</strong> This report is generated for research and demonstration
     purposes only. It does not constitute legal advice and is not a substitute for a
-    professional legal audit. PrivacyPilot — Capstone Project 2024–25.
+    professional legal audit. PrivacyPilot — B.Tech Capstone Project.
   </div>
 
 </div>

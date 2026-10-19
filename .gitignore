@@ -34,3 +34,6 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Eval inputs can contain a GitHub token
+eval/repos.json

@@ -281,9 +281,9 @@ const FEATURES = [
 const DPDP_SECTIONS = [
   { id: 'S.5',        slug: 'section-5',   title: 'Notice Gap Detection',      desc: 'Cross-references every PII category found in source code against your privacy policy — surfaces any data collected without prior notice, the foundational obligation under Section 5.' },
   { id: 'S.6·1',      slug: 'section-6-1', title: 'Consent Validity',          desc: 'Flags PII collected without adequate disclosure, making consent legally invalid. Consent under Section 6(1) must be free, specific, informed, and unambiguous — all three fail without proper notice.' },
-  { id: 'S.8·2',      slug: 'section-8-2', title: 'Processor Contract Check',  desc: 'Detects PII transmitted to third-party SDKs and HTTP endpoints, then checks whether your policy discloses those processors — Section 8(2) requires a binding contract with every data processor.' },
-  { id: 'S.8·5',      slug: 'section-8-5', title: 'Security Safeguard Audit',  desc: 'Identifies personal data appearing in logger, print, or monitoring-sink statements. Section 8(5) mandates technical measures to prevent unauthorised disclosure via log files or observability systems.' },
-  { id: 'Rule 3(b)(ii)',   slug: 'rule-3-b',    title: 'Purpose Clarity Check',     desc: 'Runs a purpose classifier over your policy text — when the top-2 category scores fall within 0.08 of each other, the purpose statement is flagged as ambiguous under DPDP Rules 2025 Rule 3(b)(ii).' },
+  { id: 'S.8·2',      slug: 'section-8-2', title: 'Processor Contract Check',  desc: 'Detects PII transmitted to third-party SDKs, outbound HTTP calls and message queues, then checks whether your policy names each SDK — Section 8(2) allows a data processor to be engaged only under a valid contract.' },
+  { id: 'S.8·5',      slug: 'section-8-5', title: 'Security Safeguard Audit',  desc: 'Identifies personal data appearing in logger, print, or monitoring-sink statements. Section 8(5) requires reasonable security safeguards to prevent a personal data breach — PII in logs is a common leak.' },
+  { id: 'Rule 3(b)(ii)',   slug: 'rule-3-b',    title: 'Purpose Clarity Check',     desc: 'Compares each purpose sentence in your policy with six reference purposes using sentence embeddings — when the top-2 similarity scores fall within 0.08 of each other, the statement is flagged as ambiguous under DPDP Rules 2025 Rule 3(b)(ii).' },
 ];
 
 const STEPS = [

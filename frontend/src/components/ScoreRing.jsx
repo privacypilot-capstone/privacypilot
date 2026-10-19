@@ -40,7 +40,7 @@ export default function ScoreRing({ score, color = '#6366f1', size = 160 }) {
         fontFamily="Inter, system-ui, sans-serif"
         fill={color}
       >
-        {score}
+        {score > 0 && score < 0.1 ? score.toFixed(4) : Number(score).toFixed(1)}
       </text>
       {/* /100 label */}
       <text

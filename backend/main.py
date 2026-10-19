@@ -73,9 +73,42 @@ class ScanRequest(BaseModel):
         return self.__repr__()
 
 
+def _component_status() -> dict:
+    """
+    Which optional components are actually installed. Several checks degrade
+    silently when a package is missing (e.g. no sentence-transformers → no
+    Rule 3(b)(ii) vagueness check), so /health reports them explicitly.
+    """
+    from importlib.util import find_spec
+    return {
+        "celery (scan queue)":                    find_spec("celery") is not None,
+        "redis (scan queue)":                     find_spec("redis") is not None,
+        "en_core_web_lg (Presidio NER, spaCy)":   find_spec("en_core_web_lg") is not None,
+        "sentence_transformers (Rule 3, vagueness)": find_spec("sentence_transformers") is not None,
+        "tree_sitter_javascript (JS taint)":      find_spec("tree_sitter_javascript") is not None,
+        "reportlab (PDF reports)":                find_spec("reportlab") is not None,
+    }
+
+
+@app.on_event("startup")
+def _warn_missing_components():
+    missing = [name for name, ok in _component_status().items() if not ok]
+    if missing:
+        print(
+            "[startup] WARNING: missing components — "
+            + ", ".join(missing)
+            + ". Run `pip install -r requirements.txt` in backend/."
+        )
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "message": "PrivacyPilot is running"}
+    components = _component_status()
+    return {
+        "status":     "ok" if all(components.values()) else "degraded",
+        "message":    "PrivacyPilot is running",
+        "components": components,
+    }
 
 
 @app.post("/scan")

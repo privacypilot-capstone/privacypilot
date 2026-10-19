@@ -162,7 +162,7 @@ for text, expected, label in PARAPHRASE_CASES:
 
 vague_pass = 0
 print("Margin-based vagueness detection:")
-for text, expect_vague, label in VAGUE_CASES:
+for text, expect_vague, label in VAGUENESS_TEST:
     is_vague, top_cat, top_score, margin = is_vague_by_margin(text)
     correct = is_vague == expect_vague
     if correct:
@@ -174,7 +174,8 @@ for text, expect_vague, label in VAGUE_CASES:
 print(f"\n{'='*65}")
 print(f"Direct cases:    {direct_pass}/6")
 print(f"Paraphrase cases: {paraphrase_pass}/4")
-print(f"Vagueness cases:  {vague_pass}/5")
+print(f"Vagueness cases:  {vague_pass}/{len(VAGUENESS_TEST)}")
 
-overall = direct_pass == 6 and paraphrase_pass >= 3 and vagueness_pass_threshold = 4
+vagueness_pass_threshold = 4
+overall = direct_pass == 6 and paraphrase_pass >= 3 and vague_pass >= vagueness_pass_threshold
 print(f"\n{'PHASE 4: PASS' if overall else 'PHASE 4: FAIL'}")

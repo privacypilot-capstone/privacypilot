@@ -1,6 +1,7 @@
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 import re
+import threading
 
 # India-specific regex patterns
 INDIA_PATTERNS = {
@@ -69,24 +70,39 @@ def _extract_valid_aadhaar(text: str) -> bool:
             return True
     return False
 
-# Lazy-load analyzer so it doesn't crash if spacy not ready
+# Lazy-load analyzer so it doesn't crash if spacy not ready.
+# None = not tried yet, False = tried and unavailable (don't retry).
 _analyzer = None
+_analyzer_lock = threading.Lock()   # the code scanner calls this from 40 threads
+
 
 def get_analyzer():
+    """
+    Load Presidio once. On failure, remember the failure (sentinel False)
+    instead of retrying on every scanned line, and say exactly what is
+    missing — previously a missing spaCy model was retried on every line of
+    every file and NER was skipped without a clear warning.
+    """
     global _analyzer
     if _analyzer is None:
-        try:
-            provider = NlpEngineProvider(nlp_configuration={
-                "nlp_engine_name": "spacy",
-                "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
-            })
-            nlp_engine = provider.create_engine()
-            _analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
-            print("[presidio] Analyzer loaded")
-        except Exception as e:
-            print(f"[presidio] Could not load: {e}")
-            _analyzer = None
-    return _analyzer
+        with _analyzer_lock:
+            if _analyzer is None:
+                try:
+                    provider = NlpEngineProvider(nlp_configuration={
+                        "nlp_engine_name": "spacy",
+                        "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
+                    })
+                    nlp_engine = provider.create_engine()
+                    _analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+                    print("[presidio] Analyzer loaded")
+                except Exception as e:
+                    print(
+                        f"[presidio] WARNING: Presidio NER disabled — {e}. "
+                        "Run `pip install -r requirements.txt` (it installs "
+                        "en_core_web_lg). Only the India regexes will run."
+                    )
+                    _analyzer = False
+    return _analyzer or None
 
 
 # SDK / library proper nouns that Presidio wrongly tags as PERSON entities.

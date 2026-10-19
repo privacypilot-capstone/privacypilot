@@ -13,6 +13,16 @@ function scoreColor(score) {
   return '#ef4444';
 }
 
+// Colour per backend rating band (same palette as scoreColor's bands).
+function ratingColor(rating) {
+  return {
+    Good:     '#22c55e',
+    Moderate: '#eab308',
+    Poor:     '#f97316',
+    Critical: '#ef4444',
+  }[rating] ?? '#ef4444';
+}
+
 function scoreRating(score) {
   if (score >= 80) return 'Good';
   if (score >= 60) return 'Moderate';
@@ -88,10 +98,13 @@ function AISummary({ text }) {
 export default function ResultsDashboard({ scanId, result, violations, findings, compliance, aiSummary, aiLoading, aiError }) {
   const [sevFilter, setSevFilter] = useState('all');
 
-  // Compute stats from compliance or violations
+  // Use the backend's rating when it is present: scoring.py caps the rating
+  // at "Poor" whenever a critical violation exists, which a score-only
+  // threshold cannot know (1 critical → score 80 → would show "Good").
+  // The score-band helpers are only a fallback for responses without it.
   const score  = compliance?.score ?? 0;
-  const color  = scoreColor(score);
-  const rating = scoreRating(score);
+  const rating = compliance?.rating ?? scoreRating(score);
+  const color  = compliance?.rating ? ratingColor(compliance.rating) : scoreColor(score);
 
   const counts = { critical: 0, high: 0, medium: 0, low: 0 };
   violations?.forEach(v => { if (counts[v.severity] !== undefined) counts[v.severity]++; });

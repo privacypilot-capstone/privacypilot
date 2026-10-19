@@ -64,41 +64,48 @@ def rule_of(dpdp_section: str) -> str:
 
 
 def match_repo(planted: list[dict], actual: list[dict]) -> dict:
-    """One-to-one greedy matching for a single repo. Returns counts plus
-    the leftover (unmatched) actual violations, which are this repo's FPs."""
-    remaining_actual = list(actual)  # each: {"rule":..., "pii_category":...}
-    strict_tp = lenient_tp = fn = 0
-    details = []
+    """One-to-one matching for a single repo. Returns counts plus the
+    leftover (unmatched) actual violations, which are this repo's FPs.
 
-    for gt in planted:
-        # 1. Exact match: same rule, same PII category.
-        exact_idx = next(
-            (i for i, a in enumerate(remaining_actual)
+    Two passes, so the result does not depend on the order of the planted
+    list: every EXACT match (same rule + same PII category) is made first,
+    and only then are the remaining planted violations allowed a PARTIAL
+    match (same rule, other category). A single greedy pass let an earlier
+    planted violation take, as a partial match, the detection that exactly
+    matched a later one — turning a strict TP into a strict FN.
+    """
+    remaining_actual = list(actual)  # each: {"rule":..., "pii_category":...}
+    outcome: list[str | None] = [None] * len(planted)
+
+    # Pass 1: exact matches
+    for i, gt in enumerate(planted):
+        idx = next(
+            (j for j, a in enumerate(remaining_actual)
              if a["rule"] == gt["rule"] and a["pii_category"] == gt["pii_category"]),
             None,
         )
-        if exact_idx is not None:
-            remaining_actual.pop(exact_idx)
-            strict_tp += 1
-            lenient_tp += 1
-            details.append({**gt, "outcome": "TP"})
-            continue
+        if idx is not None:
+            remaining_actual.pop(idx)
+            outcome[i] = "TP"
 
-        # 2. Partial match: same rule, different PII category.
-        partial_idx = next(
-            (i for i, a in enumerate(remaining_actual) if a["rule"] == gt["rule"]),
+    # Pass 2: partial matches for whatever is still unmatched
+    for i, gt in enumerate(planted):
+        if outcome[i] is not None:
+            continue
+        idx = next(
+            (j for j, a in enumerate(remaining_actual) if a["rule"] == gt["rule"]),
             None,
         )
-        if partial_idx is not None:
-            remaining_actual.pop(partial_idx)
-            lenient_tp += 1
-            fn += 1  # counts as FN under strict scoring
-            details.append({**gt, "outcome": "PARTIAL"})
-            continue
+        if idx is not None:
+            remaining_actual.pop(idx)
+            outcome[i] = "PARTIAL"
+        else:
+            outcome[i] = "MISSED"
 
-        # 3. No match at all.
-        fn += 1
-        details.append({**gt, "outcome": "MISSED"})
+    strict_tp  = outcome.count("TP")
+    lenient_tp = strict_tp + outcome.count("PARTIAL")
+    fn         = outcome.count("PARTIAL") + outcome.count("MISSED")  # strict FN
+    details    = [{**gt, "outcome": o} for gt, o in zip(planted, outcome)]
 
     fp = len(remaining_actual)
     return {

@@ -50,8 +50,9 @@ const SECTIONS = [
     why: 'Most modern applications transmit personal data to dozens of third-party services — analytics SDKs, communication providers, payment processors, cloud queues. Section 8(2) ensures that outsourcing processing does not dilute user rights. Without a Data Processing Agreement (DPA), sharing is unlawful even if the policy mentions the third party.',
     howpp: [
       'Identifies every code location where a PII field is co-located with a third-party SDK call (Firebase, Mixpanel, Amplitude, Segment, Twilio, SendGrid, etc.).',
-      'Checks whether the transmitting SDK is disclosed in the privacy policy as a data processor.',
-      'Flags each undisclosed transmission as a Section 5 + Section 8(2) joint violation — both the notice failure and the missing processor contract.',
+      'Also follows PII through variable assignments (AST taint analysis) to the call that sends it, so a value read on one line and sent on another is still caught.',
+      'Checks whether the privacy policy names that SDK in the same sentence as that data category. A negated mention ("we never share your phone number with Twilio") does not count as disclosure.',
+      'Not named → Section 5 + Section 8(2) violation (critical for sensitive data, otherwise high). Named → a medium Section 8(2) finding only, because whether a processor contract exists cannot be verified from the policy or the code.',
       'Sensitive category transmissions are escalated to "critical" severity.',
     ],
     example: {
@@ -66,7 +67,7 @@ const SECTIONS = [
     label: 'Security Safeguards',
     title: 'Security Safeguards — Preventing Unauthorised Disclosure',
     act: 'DPDP Act 2023',
-    what: 'Every Data Fiduciary must implement appropriate technical and organisational measures to protect personal data from unauthorised access, disclosure, or processing. Section 8(5) is a principles-based obligation — the DPDP Rules 2025 specify that this includes ensuring personal data does not appear in insecure channels.',
+    what: 'Section 8(5) requires every Data Fiduciary to protect personal data in its possession or under its control — including processing done on its behalf by a Data Processor — by taking reasonable security safeguards to prevent personal data breach. Rule 6 of the DPDP Rules 2025 lists the minimum safeguards, such as encryption, obfuscation or masking, access control, and logging and monitoring of access. (The separate duty to implement "appropriate technical and organisational measures" is Section 8(4).)',
     why: 'Log files and monitoring systems are among the most common vectors for personal data leakage. Logs flow into cloud observability platforms (Datadog, CloudWatch, Sentry), are often retained indefinitely, and are accessible to a broad set of internal and vendor employees. PII in logs is a breach waiting to happen — and a regulator\'s first stop in a post-incident audit.',
     howpp: [
       'Detects any code location where a PII field appears in a log, print, or monitoring-sink statement.',
@@ -89,9 +90,9 @@ const SECTIONS = [
     what: 'Rule 3(b)(ii) of the DPDP Rules 2025 requires that a Data Fiduciary\'s notice specifies the purpose of processing personal data in clear and plain language. Vague or generic purpose statements — "to improve services", "for analytics", "for business purposes" — do not satisfy this requirement because they do not give the Data Principal enough information to make a meaningful consent decision.',
     why: 'A vague purpose statement is a legal loophole that enables unlimited data use under a single consent. It also makes consent non-specific, invalidating it under Section 6(1). Regulators consistently flag imprecise purpose language as a first-order compliance failure because it is easy to identify and impossible to defend.',
     howpp: [
-      'Runs a multi-class purpose classifier over each purpose clause in the privacy policy, trained on DPDP-relevant categories (service delivery, analytics, marketing, fraud prevention, legal compliance, etc.).',
-      'When the classifier\'s top-two category scores are within 0.08 of each other, the purpose statement is ambiguous — it reads equally as two different things.',
-      'Each ambiguous clause is flagged as a Rule 3(b)(ii) violation with the specific margin shown.',
+      'Takes each policy sentence that names a PII category and compares it, using all-MiniLM-L6-v2 sentence embeddings, with six reference purpose sentences (service delivery, analytics, marketing, security, communication, research). This is zero-shot similarity — no model is trained.',
+      'When the top-two similarity scores are within 0.08 of each other, the purpose statement is ambiguous — it reads equally as two different things.',
+      'The most ambiguous sentence for each PII category is flagged as one Rule 3(b)(ii) violation, quoting the sentence and showing the margin.',
       'Recommendations identify the ambiguous language and suggest concrete rewrites.',
     ],
     example: {

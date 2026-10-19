@@ -17,7 +17,7 @@ import socket
 import requests
 from urllib.parse import urlparse
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
-from dpdp.rule_engine import ALL_SDK_SINKS
+from scanners.sinks import sdks_named_in
 
 # ── Security: URL Validation ──────────────────────────────────────────────────
 
@@ -88,29 +88,79 @@ COLLECTION_CONTEXT = [
     'retain', 'record', 'access', 'handle',
 ]
 
+
+def _verb_forms(verb: str) -> list[str]:
+    """collect → collect, collects, collected, collecting; use → use, uses, used, using."""
+    forms = {verb, verb + 's'}
+    if verb.endswith('e'):
+        forms |= {verb + 'd', verb[:-1] + 'ing'}
+    else:
+        forms |= {verb + 'ed', verb + 'ing', verb + 'es'}
+    if verb == 'transfer':
+        forms |= {'transferred', 'transferring'}
+    return sorted(forms, key=len, reverse=True)
+
+
+# Whole-word match on the verb forms. The old substring test treated "use"
+# inside "because" / "user" / "house" as a collection verb.
+_CONTEXT_RE = re.compile(
+    r'\b(?:' + '|'.join(f for v in COLLECTION_CONTEXT for f in _verb_forms(v)) + r')\b'
+)
+
 # ── Sentence-level PII map (requires collection-context verb in same sentence) ──
-# Kept broad — collection verb acts as the precision gate.
+# Matched with word boundaries, longest phrase first, so:
+#   - "pan" no longer fires inside "expand" / "company" / "japan";
+#   - "address" inside "email address" is consumed by EMAIL, not LOCATION;
+#   - vague words that do not name a PII category ("personal", "identity",
+#     "password", bare "contact") are no longer mapped to one.
 POLICY_PII_MAP = {
-    'name':       PIICategory.NAME,
-    'email':      PIICategory.EMAIL,
-    'phone':      PIICategory.PHONE,
-    'mobile':     PIICategory.PHONE,
-    'location':   PIICategory.LOCATION,
-    'address':    PIICategory.LOCATION,
-    'health':     PIICategory.HEALTH,
-    'medical':    PIICategory.HEALTH,
-    'aadhaar':    PIICategory.AADHAAR,
-    'pan':        PIICategory.PAN,
-    'financial':  PIICategory.FINANCIAL,
-    'bank':       PIICategory.FINANCIAL,
-    'birth':      PIICategory.DOB,
-    'dob':        PIICategory.DOB,
-    'biometric':  PIICategory.BIOMETRIC,
-    'password':   PIICategory.FINANCIAL,
-    'contact':    PIICategory.PHONE,
-    'identity':   PIICategory.NAME,
-    'personal':   PIICategory.NAME,
+    # Aadhaar
+    'aadhaar number': PIICategory.AADHAAR, 'aadhar number': PIICategory.AADHAAR,
+    'aadhaar':        PIICategory.AADHAAR, 'aadhar':        PIICategory.AADHAAR,
+    # PAN
+    'permanent account number': PIICategory.PAN,
+    'pan card': PIICategory.PAN, 'pan number': PIICategory.PAN, 'pan': PIICategory.PAN,
+    # Phone
+    'phone number': PIICategory.PHONE, 'mobile number': PIICategory.PHONE,
+    'telephone number': PIICategory.PHONE, 'contact number': PIICategory.PHONE,
+    'phone': PIICategory.PHONE, 'mobile': PIICategory.PHONE, 'telephone': PIICategory.PHONE,
+    # Email
+    'email address': PIICategory.EMAIL, 'e-mail address': PIICategory.EMAIL,
+    'email id': PIICategory.EMAIL, 'email': PIICategory.EMAIL, 'e-mail': PIICategory.EMAIL,
+    # Location
+    'ip address': PIICategory.LOCATION, 'postal address': PIICategory.LOCATION,
+    'home address': PIICategory.LOCATION, 'residential address': PIICategory.LOCATION,
+    'billing address': PIICategory.LOCATION, 'shipping address': PIICategory.LOCATION,
+    'mailing address': PIICategory.LOCATION, 'geolocation': PIICategory.LOCATION,
+    'location': PIICategory.LOCATION, 'address': PIICategory.LOCATION, 'gps': PIICategory.LOCATION,
+    # Health
+    'health information': PIICategory.HEALTH, 'health data': PIICategory.HEALTH,
+    'health records': PIICategory.HEALTH, 'medical records': PIICategory.HEALTH,
+    'medical information': PIICategory.HEALTH, 'medical history': PIICategory.HEALTH,
+    'blood group': PIICategory.HEALTH, 'diagnosis': PIICategory.HEALTH,
+    'prescription': PIICategory.HEALTH, 'health': PIICategory.HEALTH, 'medical': PIICategory.HEALTH,
+    # Financial
+    'financial information': PIICategory.FINANCIAL, 'payment information': PIICategory.FINANCIAL,
+    'bank account': PIICategory.FINANCIAL, 'bank details': PIICategory.FINANCIAL,
+    'credit card': PIICategory.FINANCIAL, 'debit card': PIICategory.FINANCIAL,
+    'account number': PIICategory.FINANCIAL, 'upi id': PIICategory.FINANCIAL,
+    'financial': PIICategory.FINANCIAL, 'bank': PIICategory.FINANCIAL,
+    # Name
+    'full name': PIICategory.NAME, 'first name': PIICategory.NAME, 'last name': PIICategory.NAME,
+    'legal name': PIICategory.NAME, 'your name': PIICategory.NAME, 'name': PIICategory.NAME,
+    # Date of birth
+    'date of birth': PIICategory.DOB, 'birth date': PIICategory.DOB,
+    'birthdate': PIICategory.DOB, 'dob': PIICategory.DOB,
+    # Biometric
+    'facial recognition': PIICategory.BIOMETRIC, 'face recognition': PIICategory.BIOMETRIC,
+    'fingerprint': PIICategory.BIOMETRIC, 'iris scan': PIICategory.BIOMETRIC,
+    'biometric': PIICategory.BIOMETRIC,
 }
+_POLICY_PHRASES = sorted(POLICY_PII_MAP.items(), key=lambda kv: len(kv[0]), reverse=True)
+_POLICY_PHRASE_RX = [
+    (re.compile(r'(?<![a-z0-9])' + re.escape(p) + r'(?![a-z0-9])'), p, c)
+    for p, c in _POLICY_PHRASES
+]
 
 # ── Bullet-specific PII map: precise multi-word phrases, longest-first ────────
 # Used by Pass 1b WITHOUT a collection-verb gate.  Longer phrases must appear
@@ -197,23 +247,51 @@ BULLET_PII_MAP: list[tuple[str, "PIICategory"]] = [
 # but are definitively NOT about PII collection (e.g. navigation links,
 # section headings, company references).  Each is a compiled word-boundary regex.
 _BULLET_EXCLUSIONS = [re.compile(p, re.IGNORECASE) for p in [
-    r'contact\s+us',
-    r'contact\s+page',
-    r'contact\s+form',
-    r'contact\s+details?\s+of\s+(?:our|the|company|officer|grievance)',
-    r'company\s+name',
-    r'brand\s+name',
-    r'product\s+name',
-    r'file\s+name',
-    r'domain\s+name',
-    r'app\s+name',
-    r'bank\s+holiday',
-    r'address\s+bar',
-    r'pan\s+(?:india|asian|pacific|american|european)',
-    r'medical\s+(?:disclaimer|advice|professional)',
-    r'health\s+(?:tips?|advice|disclaimer|insurance\s+claim)',
-    r'financial\s+(?:advice|disclaimer|year|planning\s+tips?)',
+    r'\bcontact\s+us\b',
+    r'\bcontact\s+page\b',
+    r'\bcontact\s+form\b',
+    r'\bcontact\s+details?\s+of\s+(?:our|the|company|officer|grievance)\b',
+    r'\bcompany\s+name\b',
+    r'\bbrand\s+name\b',
+    r'\bproduct\s+name\b',
+    r'\bfile\s+name\b',
+    r'\bdomain\s+name\b',
+    r'\bapp\s+name\b',
+    r'\bbank\s+holiday\b',
+    r'\baddress\s+bar\b',
+    r'\bpan\s+(?:india|asian|pacific|american|european)\b',
+    r'\bmedical\s+(?:disclaimer|advice|professional)\b',
+    r'\bhealth\s+(?:tips?|advice|disclaimer|insurance\s+claim)\b',
+    r'\bfinancial\s+(?:advice|disclaimer|year|planning\s+tips?)\b',
 ]]
+
+# Extra exclusions for full sentences (applied together with the bullet ones).
+_SENTENCE_EXCLUSIONS = _BULLET_EXCLUSIONS + [re.compile(p, re.IGNORECASE) for p in [
+    r'\bmobile\s+(?:app|apps|application|applications|device|devices|version|site|website|browser|platform|operating\s+system)\b',
+    r'\bname\s+of\s+(?:the|our|this)\s+(?:company|website|site|app|application|service|product|platform)\b',
+    r'\bhealth\s+of\s+(?:the|our)\s+(?:service|services|platform|systems?|website|app)\b',
+]]
+
+
+def _find_policy_pii(text_lower: str, exclusions=None) -> list[tuple[PIICategory, str]]:
+    """
+    PII categories named in a sentence: whole-word phrases, longest first,
+    each character used by at most one phrase, excluded phrases blanked out.
+    Returns [(category, phrase), ...] in first-seen order, one per category.
+    """
+    exclusions = _SENTENCE_EXCLUSIONS if exclusions is None else exclusions
+    for exc in exclusions:
+        text_lower = exc.sub(lambda m: ' ' * len(m.group(0)), text_lower)
+    taken: list[tuple[int, int]] = []
+    found: dict[PIICategory, tuple[int, str]] = {}
+    for rx, phrase, cat in _POLICY_PHRASE_RX:
+        for m in rx.finditer(text_lower):
+            if any(m.start() < e and s < m.end() for s, e in taken):
+                continue
+            taken.append((m.start(), m.end()))
+            if cat not in found or m.start() < found[cat][0]:
+                found[cat] = (m.start(), phrase)
+    return [(c, p) for c, (pos, p) in sorted(found.items(), key=lambda kv: kv[1][0])]
 
 SENSITIVITY_MAP = {
     PIICategory.AADHAAR:   Sensitivity.SENSITIVE,
@@ -288,7 +366,11 @@ def _get_nlp():
             _nlp = spacy.load("en_core_web_lg")
             print("[policy] spaCy en_core_web_lg loaded")
         except Exception as e:
-            print(f"[policy] spaCy unavailable: {e}")
+            print(
+                f"[policy] WARNING: spaCy en_core_web_lg unavailable ({e}) — "
+                "dependency-parse purpose extraction is OFF. "
+                "Run `pip install -r requirements.txt`."
+            )
             _nlp = False  # sentinel — don't retry
     return _nlp if _nlp is not False else None
 
@@ -304,7 +386,11 @@ def _get_st_model():
             _template_embeddings = _st_model.encode(templates, normalize_embeddings=True)
             print("[policy] sentence-transformer all-MiniLM-L6-v2 loaded")
         except Exception as e:
-            print(f"[policy] sentence-transformer unavailable: {e}")
+            print(
+                f"[policy] WARNING: sentence-transformers unavailable ({e}) — "
+                "semantic purpose classification and the Rule 3(b)(ii) "
+                "vagueness check are OFF. Run `pip install -r requirements.txt`."
+            )
             _st_model = False
     return (_st_model if _st_model is not False else None), _template_embeddings
 
@@ -575,21 +661,21 @@ def _pass1_extract_pii(
         sentence = sentence.strip()
         if len(sentence) < 10:
             continue
-        has_context = any(word in sentence for word in COLLECTION_CONTEXT)
-        for keyword, category in POLICY_PII_MAP.items():
-            if keyword in sentence and category not in seen:
-                if has_context:
-                    seen.add(category)
-                    findings.append(DataFlowObject(
-                        source="policy_parser",
-                        file_path=None,
-                        line_number=None,
-                        raw_text=sentence[:300],
-                        field_name=keyword,
-                        pii_category=category,
-                        sensitivity=SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN),
-                        third_party_sdk=None,
-                    ))
+        if not _CONTEXT_RE.search(sentence):
+            continue
+        for category, keyword in _find_policy_pii(sentence):
+            if category not in seen:
+                seen.add(category)
+                findings.append(DataFlowObject(
+                    source="policy_parser",
+                    file_path=None,
+                    line_number=None,
+                    raw_text=sentence[:300],
+                    field_name=keyword,
+                    pii_category=category,
+                    sensitivity=SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN),
+                    third_party_sdk=None,
+                ))
 
     # ── Pass 1b: bullet-list sub-pass (NLP-enhanced) ────────────────────
     # Many privacy policies list PII types in <li> elements without a verb.
@@ -657,7 +743,7 @@ def _pass2_extract_purposes(
       2. Extract purposes from those sentences using:
          a. spaCy dependency parsing (4-pass)
          b. sentence-transformer cosine similarity (all-MiniLM-L6-v2)
-         c. Keyword fallback when models unavailable
+         c. Keyword fallback when the sentence-transformer is unavailable
       3. Flag vagueness when top-2 ST scores are within VAGUENESS_MARGIN.
 
     Returns:
@@ -674,20 +760,17 @@ def _pass2_extract_purposes(
     raw_sentences = re.split(r'[.!?]', full_text_lower)
     raw_sentences = [s.strip() for s in raw_sentences if len(s.strip()) > 15]
 
-    # Reverse-map: PII keyword → category (multiple keywords per category)
-    pii_to_kw: dict[PIICategory, list[str]] = {}
-    for kw, cat in POLICY_PII_MAP.items():
-        pii_to_kw.setdefault(cat, []).append(kw)
+    # Which PII categories each sentence names — same whole-word, longest-
+    # phrase matcher as Pass 1, so Pass 2 looks at the same sentences.
+    sentence_cats = [
+        (s, {c for c, _ in _find_policy_pii(s)}) for s in raw_sentences
+    ]
 
     for cat in policy_pii_categories:
-        keywords_for_cat = pii_to_kw.get(cat, [])
         cat_purposes: set[str] = set()
 
         # Collect sentences mentioning this PII category
-        relevant = [
-            s for s in raw_sentences
-            if any(kw in s for kw in keywords_for_cat)
-        ]
+        relevant = [s for s, cats in sentence_cats if cat in cats]
         if not relevant:
             continue
 
@@ -717,7 +800,7 @@ def _pass2_extract_purposes(
                     })
 
             # ── Keyword fallback ───────────────────────────────────────────
-            if not nlp and (st_model is None):
+            if st_model is None:
                 p = _keyword_purpose(sent)
                 if p:
                     cat_purposes.add(p)
@@ -749,12 +832,33 @@ def _pass2_extract_purposes(
 # with that SDK is treated as disclosed, and the rule engine downgrades its
 # finding instead of repeating a false "undisclosed" claim.
 #
-# Simplifying assumption: this is same-sentence co-occurrence, not negation-
-# aware (a sentence saying "we do NOT share data with Firebase" would also
-# count as disclosure of Firebase). That is intentional, not a bug: Section
-# 5's notice requirement is about informing the user which named parties are
-# in play, and naming a processor — in any polarity — already does that.
-# Negation handling is listed as a limitation, not attempted here.
+# Matching (revised): both the PII category and the SDK are matched as whole
+# words/names — the PII side with the same _find_policy_pii() matcher as
+# Pass 1 (so "company" is not PAN and "email address" is not location), the
+# SDK side with scanners.sinks.sdks_named_in() (so the generic word
+# "analytics" or "we segment customers" is not a named SDK).
+#
+# Negation: a clause such as "we never share your phone number with Twilio"
+# does NOT count as disclosure. If the code does send that data to Twilio,
+# the notice actively says the opposite of what happens, which is a worse
+# notice failure, not a satisfied one — so that pairing stays "undisclosed".
+# Only a negation word between the start of the SDK's clause and the SDK
+# name is considered; "we share it with Mixpanel and do not sell it" is
+# still a disclosure.
+
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|neither|nor|don't|doesn't|won't|cannot|can't)\b"
+)
+_CLAUSE_BREAK_RE = re.compile(r",|\bbut\b|\bhowever\b|\bwhereas\b|\bexcept\b")
+
+
+def _negated_before(sentence: str, pos: int) -> bool:
+    """True if a negation word sits in the same clause, before position `pos`."""
+    head = sentence[:pos]
+    breaks = [m.end() for m in _CLAUSE_BREAK_RE.finditer(head)]
+    clause = head[breaks[-1]:] if breaks else head
+    return bool(_NEGATION_RE.search(clause))
+
 
 def _pass3_extract_disclosed_sdks(
     full_text_lower: str,
@@ -763,15 +867,14 @@ def _pass3_extract_disclosed_sdks(
     """
     Returns {PIICategory → set[sdk_name]} for every (category, SDK) pair
     that co-occurs in the same sentence of the privacy policy — i.e. SDKs
-    the policy already names as a recipient of that PII category.
+    the policy already names as a recipient of that PII category — unless
+    the sentence negates sharing with that SDK.
     """
+    from scanners.sinks import SDK_DISCLOSURE_PATTERNS
+
     disclosed: dict[PIICategory, set[str]] = {}
     if not policy_pii_categories:
         return disclosed
-
-    pii_to_kw: dict[PIICategory, list[str]] = {}
-    for kw, cat in POLICY_PII_MAP.items():
-        pii_to_kw.setdefault(cat, []).append(kw)
 
     sentences = re.split(r'[.!?;]', full_text_lower)
     for sentence in sentences:
@@ -779,14 +882,19 @@ def _pass3_extract_disclosed_sdks(
         if len(sentence) < 10:
             continue
 
-        sdks_in_sentence = {sdk for sdk in ALL_SDK_SINKS if sdk in sentence}
+        named = sdks_named_in(sentence)
+        if not named:
+            continue
+        sdks_in_sentence = {
+            sdk for sdk in named
+            if not _negated_before(sentence, SDK_DISCLOSURE_PATTERNS[sdk].search(sentence).start())
+        }
         if not sdks_in_sentence:
             continue
 
-        for cat in policy_pii_categories:
-            keywords_for_cat = pii_to_kw.get(cat, [])
-            if any(kw in sentence for kw in keywords_for_cat):
-                disclosed.setdefault(cat, set()).update(sdks_in_sentence)
+        cats_in_sentence = {c for c, _ in _find_policy_pii(sentence)}
+        for cat in cats_in_sentence & set(policy_pii_categories):
+            disclosed.setdefault(cat, set()).update(sdks_in_sentence)
 
     if disclosed:
         print(f"[policy] disclosed_sdks: { {k.value: v for k, v in disclosed.items()} }")

@@ -10,7 +10,7 @@ const SCAN_STEPS = [
   { label: 'Scanning for PII',          sub: 'Running regex + NER classifiers' },
   { label: 'Parsing privacy policy',    sub: 'Extracting PII disclosures' },
   { label: 'Detecting consent gaps',    sub: 'Comparing code vs. policy claims' },
-  { label: 'Running DPDP rule engine',  sub: 'Checking 5 DPDP Act sections' },
+  { label: 'Running DPDP rule engine',  sub: 'Checking 4 DPDP Act provisions + Rule 3(b)(ii)' },
   { label: 'Computing compliance score',sub: 'Calculating risk-weighted score' },
 ];
 

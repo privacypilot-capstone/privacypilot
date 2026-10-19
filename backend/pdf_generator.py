@@ -63,7 +63,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(Spacer(1, 8*mm))
 
     # ── Score ─────────────────────────────────────────────────────────────────
-    score     = compliance.get('score', 0)
+    score     = compliance.get('score_display', compliance.get('score', 0))
     rating    = compliance.get('rating', 'Unknown')
     critical  = compliance.get('critical_count', 0)
     high      = compliance.get('high_count', 0)
@@ -249,7 +249,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(Spacer(1, 8*mm))
     story.append(Paragraph(
         '<b>Disclaimer:</b> This report is for research and demonstration purposes only. '
-        'It does not constitute legal advice. PrivacyPilot — Capstone Project 2024–25.',
+        'It does not constitute legal advice. PrivacyPilot — B.Tech Capstone Project.',
         ParagraphStyle('disc', fontSize=7, textColor=HexColor('#888888'),
             fontName='Helvetica', leading=10)
     ))

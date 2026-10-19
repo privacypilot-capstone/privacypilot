@@ -17,6 +17,9 @@ Section mapping verified against DPDP Act 2023 text:
 """
 
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
+from scanners.sinks import (
+    sink_kind, SDK_LABELS, HTTP_LABELS, QUEUE_LABELS, LOGGER_LABELS,
+)
 
 # ── PII sensitivity tiers ───────────────────────────────────────────────────
 SENSITIVE_CATEGORIES = {
@@ -28,37 +31,18 @@ SENSITIVE_CATEGORIES = {
 }
 
 # ── Sink categories for Rule 2 ──────────────────────────────────────────────
-# Analytics / tracking SDKs — secondary-use risk (Section 5 + 8(2))
-ANALYTICS_SDKS = {
-    'firebase', 'mixpanel', 'amplitude',
-    'segment', 'analytics', 'crashlytics', 'clevertap',
-}
-
-# Communication SDKs — third-party processor (Section 5 + 8(2))
-COMMUNICATION_SDKS = {
-    'twilio', 'sendgrid',
-}
-
-# Logger sinks — security safeguard risk (Section 8(5))
-# Match substrings found in third_party_sdk or raw_text via code_scanner taint
-LOGGER_SINKS = {
-    'logging', 'logger', 'log.info', 'log.debug', 'log.warning',
-    'log.error', 'console.log', 'console.error', 'print', 'sentry',
-    'cloudwatch', 'datadog',
-}
-
-# Outbound HTTP sinks — data transmission (Section 5 + 8(2))
-HTTP_SINKS = {
-    'requests.post', 'requests.put', 'axios.post', 'axios.put',
-    'fetch', 'httpx.post', 'urllib',
-}
-
-# Queue / message broker sinks (Section 5 + 8(2))
-QUEUE_SINKS = {
-    'kafka', 'rabbitmq', 'celery', 'redis.publish', 'pubsub',
-}
-
-ALL_SDK_SINKS = ANALYTICS_SDKS | COMMUNICATION_SDKS
+# The label vocabulary lives in scanners/sinks.py and is shared with the code
+# scanner and the policy parser, so every label the scanner writes is one this
+# engine recognises (previously JS / queue taint labels were raw call text
+# and never matched).
+#   SDK_LABELS    — analytics + communication SDKs  → Section 5 + 8(2)
+#   HTTP_LABELS   — outbound HTTP                     → Section 5 + 8(2)
+#   QUEUE_LABELS  — queues / brokers                  → Section 5 + 8(2)
+#   LOGGER_LABELS — loggers / monitoring              → Section 8(5)
+ALL_SDK_SINKS = SDK_LABELS
+HTTP_SINKS    = HTTP_LABELS
+QUEUE_SINKS   = QUEUE_LABELS
+LOGGER_SINKS  = LOGGER_LABELS
 
 # ── Rule 3: module-type → purpose-category mapping ─────────────────────────
 # The code scanner's module classifier (scanners/code_scanner.py,
@@ -112,12 +96,16 @@ class DPDPViolation:
         }
 
 
-def _is_logger_sink(sdk: str | None, raw_text: str) -> bool:
-    """Return True if the finding's sink is a logger (Section 8(5) territory)."""
-    if sdk and any(ls in sdk.lower() for ls in LOGGER_SINKS):
-        return True
-    raw_lower = raw_text.lower()
-    return any(ls in raw_lower for ls in LOGGER_SINKS)
+def _is_logger_sink(sdk: str | None, raw_text: str = "") -> bool:
+    """
+    Return True if the finding's sink is a logger (Section 8(5) territory).
+
+    Decided from the sink label alone. The raw line text is deliberately NOT
+    substring-searched any more: "fingerprint" contains "print", so
+    `mixpanel.track('scan', fingerprint)` used to be filed under 8(5)
+    instead of 8(2). `raw_text` is kept as a parameter for compatibility.
+    """
+    return sink_kind(sdk) == 'logger'
 
 
 def run_dpdp_rules(
@@ -245,7 +233,7 @@ def run_dpdp_rules(
             continue  # logged → don't also fire SDK rules for same finding
 
         # SDK / HTTP / Queue sink path — Section 5 + Section 8(2)
-        if sdk_lower in ALL_SDK_SINKS or sdk_lower in HTTP_SINKS or sdk_lower in QUEUE_SINKS:
+        if sink_kind(sdk_lower) in ('sdk', 'http', 'queue'):
             is_sensitive = cat in SENSITIVE_CATEGORIES
 
             # Has the privacy policy already named this SDK as a recipient
@@ -256,7 +244,7 @@ def run_dpdp_rules(
             # match, so they always fall through to the undisclosed branch.
             _disclosed_set = (disclosed_sdks or {}).get(cat, set())
             is_disclosed = (
-                sdk_lower in ALL_SDK_SINKS
+                sink_kind(sdk_lower) == 'sdk'
                 and sdk_lower in {s.lower() for s in _disclosed_set}
             )
 
@@ -323,10 +311,20 @@ def run_dpdp_rules(
     # A mismatch means data is processed for a purpose not disclosed → Section 6(1)
     # consent cannot be "specific" or "informed".
     #
-    # This rule fires only when both maps are populated (after Steps 4 & 5).
+    # This rule runs whenever the code side (usage_map) is available. An empty
+    # purpose_map is NOT a reason to skip it: a policy that states no purpose
+    # at all is the worst case, and every module use then lacks a stated
+    # purpose (previously the rule was skipped exactly then).
+    #
+    # Categories already reported by Rule 1 (absent from the policy entirely)
+    # are skipped here: the notice gap already covers them, and reporting the
+    # same category twice double-penalised it in the compliance score.
 
-    if usage_map and purpose_map:
+    if usage_map:
+        purpose_map = purpose_map or {}
         for cat, code_uses in usage_map.items():
+            if cat in gap_categories:
+                continue   # covered by Rule 1 — avoid double counting
             policy_purposes = purpose_map.get(cat, set())
 
             # Translate each module-type label into the purpose category(ies)

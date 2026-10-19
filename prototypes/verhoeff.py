@@ -38,7 +38,10 @@ if "presidio_analyzer" not in sys.modules:
     sys.modules["presidio_analyzer"] = _fake_pa
     sys.modules["presidio_analyzer.nlp_engine"] = _fake_nlp
 
-sys.path.insert(0, "/app")  # backend/ is mounted at /app in the Docker image
+from pathlib import Path
+# backend/ relative to this file, so the script runs from any checkout
+# (it used to work only inside Docker, where backend/ is mounted at /app)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from scanners.presidio_scanner import verhoeff_checksum_valid, scan_text_with_presidio
 from scanners.code_scanner import _validate_aadhaar
