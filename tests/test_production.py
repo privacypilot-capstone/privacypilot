@@ -914,7 +914,7 @@ def test_B2_js_relative_import_is_not_an_sdk():
 class _FakeST:
     """Every sentence scores 0.50 vs 0.48 on the top two purposes — the
     'ambiguous' margin short bullets get from all-MiniLM-L6-v2."""
-    def encode(self, texts, normalize_embeddings=True):
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=None):
         import numpy as np
         return np.array([[0.50, 0.48, 0.1, 0.1, 0.1, 0.1]])
 
@@ -988,70 +988,6 @@ def test_L1_batched_presidio_matches_per_line(monkeypatch):
     assert ("PERSON", 9, 19) in batched[0]
 
 
-# ── L2–L4: scan_github_repo — rate limit, time budget, coverage ───────────────
-
-class _GhFile:
-    def __init__(self, path, text): self.path, self.type, self.text = path, "blob", text
-
-
-class _GhRepo:
-    def __init__(self, files): self.files = {f.path: f for f in files}
-    def get_git_tree(self, sha, recursive): return _NS(tree=list(self.files.values()))
-    def get_contents(self, path): return _Content(self.files[path].text)
-
-
-class _Gh:
-    remaining = 5000
-    repo = None
-    def __init__(self, *a, **kw): _Gh.kwargs = kw
-    def get_rate_limit(self):
-        return _NS(core=_NS(remaining=_Gh.remaining, reset=_dt(2026, 10, 20, 7, 0)))
-    def get_repo(self, name): return _Gh.repo
-
-
-def _fake_github(monkeypatch, n_files=3, remaining=5000):
-    files = [_GhFile(f"app/m{i}.py", "email = request.form['email']\n") for i in range(n_files)]
-    _Gh.repo, _Gh.remaining = _GhRepo(files), remaining
-    monkeypatch.setattr(cs, "Github", _Gh)
-
-
-def test_L2_rate_limit_too_low_fails_fast_with_clear_message(monkeypatch):
-    _fake_github(monkeypatch, n_files=3, remaining=2)
-    with pytest.raises(ValueError, match="rate limit"):
-        cs.scan_github_repo("https://github.com/o/r", "")
-
-
-def test_L2_github_client_does_not_sleep_on_rate_limit(monkeypatch):
-    _fake_github(monkeypatch)
-    cs.scan_github_repo("https://github.com/o/r", "tok")
-    from github import GithubRetry
-    assert "retry" in _Gh.kwargs and not isinstance(_Gh.kwargs["retry"], GithubRetry)
-
-
-def test_L3_deadline_skips_unstarted_files_and_reports_coverage(monkeypatch):
-    import time
-    _fake_github(monkeypatch, n_files=3)
-    findings, usage, cov = cs.scan_github_repo("https://github.com/o/r", "t",
-                                               deadline=time.monotonic() - 1)
-    assert findings == [] and cov["scanned"] == 0 and cov["skipped_time"] == 3
-
-
-def test_L4_full_scan_reports_coverage(monkeypatch):
-    _fake_github(monkeypatch, n_files=3)
-    findings, usage, cov = cs.scan_github_repo("https://github.com/o/r", "t")
-    assert cov == {"total_source_files": 3, "selected": 3, "scanned": 3,
-                   "skipped_time": 0, "failed": 0}
-    assert {f.pii_category for f in findings} == {P.EMAIL}
-
-
-def test_L4_coverage_note_text():
-    note = cs.coverage_note({"total_source_files": 1014, "selected": 300, "scanned": 250,
-                             "skipped_time": 50, "failed": 0})
-    assert "250 of 1014" in note and "time limit" in note and "300-file limit" in note
-    assert cs.coverage_note({"total_source_files": 3, "selected": 3, "scanned": 3,
-                             "skipped_time": 0, "failed": 0}) is None
-
-
 # ── L5: NER only runs on lines whose result could be accepted ────────────────
 
 @pytest.mark.parametrize("line,needed", [
@@ -1082,38 +1018,521 @@ def test_L5_presidio_only_asked_for_used_entities_on_masked_lines(monkeypatch):
     assert set(rec.calls[0][1]) == set(ps.NER_ENTITIES)
 
 
-# ── L6: the whole repository is fetched as one tarball ────────────────────────
 
-def _tarball(files: dict) -> bytes:
-    import io, tarfile
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+
+# ── S1–S8: any repository size — no file cap, no whole-scan deadline ─────────
+# The repository is downloaded once (streamed to disk), split into bounded
+# chunks, and each chunk is its own Celery task; a scan is failed only when
+# progress stops. See tasks.py / scanners/repo_snapshot.py.
+
+import io as _io
+import json as _json
+import tarfile as _tarfile
+
+from scanners import repo_snapshot as rs
+
+
+def _tar_bytes(files: dict) -> bytes:
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for path, text in files.items():
             data = text.encode()
-            info = tarfile.TarInfo(f"o-r-abc123/{path}")
+            info = _tarfile.TarInfo(f"o-r-abc123/{path}")
             info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
+            tar.addfile(info, _io.BytesIO(data))
     return buf.getvalue()
 
 
-def test_L6_tarball_sources_skip_vendored_minified_and_non_source(monkeypatch):
-    blob = _tarball({"app/a.py": "x = 1\n", "web/app.js": "y()\n",
-                     "node_modules/lib/x.js": "z()\n", "web/vendor.min.js": "q()\n",
-                     "README.md": "# hi\n", "../evil.py": "bad\n"})
-    monkeypatch.setattr(cs.requests, "get", lambda url, **kw: _NS(
-        status_code=200, iter_content=lambda chunk_size: iter([blob]), raise_for_status=lambda: None,
-        headers={}))
-    repo = _NS(get_archive_link=lambda fmt, ref=None: "https://codeload.example/x.tar.gz",
-               default_branch="main")
-    assert set(cs._fetch_sources_tarball(repo)) == {"app/a.py", "web/app.js"}
+class _GhResp:
+    def __init__(self, status=200, body=b"", js=None, headers=None):
+        self.status_code, self._body, self._js = status, body, js
+        self.headers = headers or {}
+        self.content = body
+    def json(self): return self._js
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+    def iter_content(self, chunk_size):
+        for i in range(0, len(self._body), chunk_size):
+            yield self._body[i:i + chunk_size]
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
 
 
-def test_L6_full_repo_scan_uses_the_tarball_and_has_no_file_cap(monkeypatch):
-    many = {f"app/m{i}.py": "email = request.form['email']\n" for i in range(cs.MAX_API_FILES + 5)}
-    monkeypatch.setattr(cs, "_fetch_sources_tarball",
-                        lambda repo: {p: t.encode() for p, t in many.items()})
-    _fake_github(monkeypatch, n_files=0)
-    _Gh.repo.get_contents = lambda path: (_ for _ in ()).throw(AssertionError("per-file API call"))
+def _fake_github_http(monkeypatch, files: dict, tarball_ok=True, calls=None):
+    """Network double for repo_snapshot: repo metadata, commit, tarball,
+    git tree and per-file contents."""
+    blob = _tar_bytes(files)
+    calls = calls if calls is not None else []
+
+    def get(url, **kw):
+        calls.append(url)
+        if url.endswith("/repos/o/r"):
+            return _GhResp(js={"default_branch": "main"})
+        if "/commits/" in url:
+            return _GhResp(js={"sha": "abc123"})
+        if "/tarball/" in url:
+            return _GhResp(body=blob) if tarball_ok else _GhResp(status=502)
+        if "/git/trees/" in url:
+            return _GhResp(js={"truncated": False, "tree": [
+                {"type": "blob", "path": p, "size": len(t)} for p, t in files.items()]})
+        if "/contents/" in url:
+            path = url.split("/contents/", 1)[1]
+            return _GhResp(body=files[path].encode())
+        raise AssertionError(f"unexpected URL {url}")
+    monkeypatch.setattr(rs.requests, "get", get)
+    return calls
+
+
+@pytest.fixture
+def snapshot_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(rs, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+    return tmp_path / "snapshots"
+
+
+def test_S1_no_file_count_or_size_caps_remain():
+    for name in ("MAX_API_FILES", "MAX_FILES", "MAX_TARBALL_FILES",
+                 "MAX_TARBALL_BYTES", "MAX_SOURCE_FILE_BYTES"):
+        assert not hasattr(cs, name), name
+    import inspect
+    assert "deadline" not in inspect.signature(cs.scan_github_repo).parameters
+
+
+def test_S2_whole_repo_is_scanned_past_the_old_caps(monkeypatch, snapshot_root):
+    # 350 files: more than the old 300-file API cap, every one scanned,
+    # all from ONE tarball download and no per-file API calls. Bundled
+    # third-party and minified files are scanned too (tagged by origin).
+    files = {f"app/m{i}.py": "email = request.form['email']\n" for i in range(350)}
+    files["node_modules/lib/x.js"] = "const email = req.body.email;\n"
+    files["web/vendor.min.js"] = "const email = req.body.email;\n"
+    files["README.md"] = "# docs\n"
+    calls = _fake_github_http(monkeypatch, files)
+    findings, usage, cov = cs.scan_github_repo("https://github.com/o/r", "t")
+    assert cov["total_source_files"] == cov["scanned"] == 352
+    assert cov["failed"] == {}
+    assert cov["origins"] == {"first_party": 350, "third_party": 1, "generated": 1}
+    emails = [f for f in findings if f.pii_category == P.EMAIL]
+    assert len([f for f in emails if f.origin == "first_party"]) == 350
+    assert {f.origin for f in emails if f.file_path == "node_modules/lib/x.js"} == {"third_party"}
+    assert {f.origin for f in emails if f.file_path == "web/vendor.min.js"} == {"generated"}
+    assert sum("/tarball/" in u for u in calls) == 1
+    assert not any("/contents/" in u for u in calls)
+
+
+def test_S2_large_source_files_are_scanned_not_skipped(monkeypatch, snapshot_root):
+    big = "x = 1\n" * 300_000 + "email = request.form['email']\n"   # ~1.8 MB
+    _fake_github_http(monkeypatch, {"app/big.py": big})
     findings, _, cov = cs.scan_github_repo("https://github.com/o/r", "t")
-    assert cov["scanned"] == cov["total_source_files"] == len(many)
-    assert cs.coverage_note(cov) is None
+    assert cov["scanned"] == 1 and any(f.pii_category == P.EMAIL for f in findings)
+
+
+def test_S3_snapshot_downloaded_once_and_traversal_rejected(monkeypatch, snapshot_root):
+    calls = _fake_github_http(monkeypatch, {"a.py": "x = 1\n", "../evil.py": "bad\n",
+                                            "b/c.js": "y()\n"})
+    ref = rs.RepoRef("o/r", "abc123")
+    m1 = rs.ensure_snapshot(ref, "t")
+    m2 = rs.ensure_snapshot(ref, "t")
+    assert m1 == m2 and [f["path"] for f in m1["files"]] == ["a.py", "b/c.js"]
+    assert sum("/tarball/" in u for u in calls) == 1
+    assert not (snapshot_root.parent / "evil.py").exists()
+
+
+def test_S4_api_fallback_lists_and_fetches_every_file(monkeypatch, snapshot_root):
+    files = {f"app/m{i}.py": "email = request.form['email']\n" for i in range(5)}
+    calls = _fake_github_http(monkeypatch, files, tarball_ok=False)
+    monkeypatch.setattr(rs.time, "sleep", lambda s: None)
+    findings, _, cov = cs.scan_github_repo("https://github.com/o/r", "t")
+    assert cov["scanned"] == 5
+    assert sum("/contents/" in u for u in calls) == 5
+
+
+def test_S4_rate_limit_is_retried_not_failed(monkeypatch, snapshot_root):
+    def get(url, **kw):
+        return _GhResp(status=403, headers={"X-RateLimit-Remaining": "0",
+                                          "X-RateLimit-Reset": str(int(rs.time.time()) + 30)})
+    monkeypatch.setattr(rs.requests, "get", get)
+    reader = rs.SnapshotReader(rs.RepoRef("o/r", "abc123"), "t")
+    with pytest.raises(rs.RateLimited) as e:
+        cs.scan_files(reader, ["app/a.py"])          # propagates to the task's retry
+    assert 30 <= e.value.retry_after <= 40
+
+
+@pytest.mark.parametrize("sizes", [[10] * 1000, [3_000_000, 5, 5], [1] * 7])
+def test_S5_chunks_are_bounded_and_cover_every_file_once(sizes):
+    files = [{"path": f"f{i}.py", "size": s} for i, s in enumerate(sizes)]
+    chunks = rs.make_chunks(files, max_files=200, max_bytes=2 * 1024 * 1024)
+    flat = [p for c in chunks for p in c]
+    assert sorted(flat) == sorted(f["path"] for f in files)       # each exactly once
+    by_size = {f["path"]: f["size"] for f in files}
+    for c in chunks:
+        assert len(c) <= 200
+        assert len(c) == 1 or sum(by_size[p] for p in c) <= 2 * 1024 * 1024
+
+
+def test_S6_chunk_time_limit_hands_unfinished_files_to_next_round(monkeypatch):
+    import tasks
+    from celery.exceptions import SoftTimeLimitExceeded
+    seen = []
+
+    def fake_scan_files(reader, paths):
+        seen.extend(paths)
+        if paths[0] == "c.py":
+            raise SoftTimeLimitExceeded()
+        return [], {}, {"scanned": list(paths), "failed": {}}
+    monkeypatch.setattr(cs, "scan_files", fake_scan_files)
+    out = tasks.run_chunk(None, ["a.py", "b.py", "c.py", "d.py"])
+    assert out["scanned"] == ["a.py", "b.py"]
+    assert out["unfinished"] == ["c.py", "d.py"]
+
+
+@pytest.fixture
+def mem_db(monkeypatch):
+    """Fresh in-memory database shared by tasks.py and main.py."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    import database, tasks
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    database.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(tasks, "_db", Session)
+    return Session
+
+
+def _policy_payload():
+    import tasks
+    claim = DataFlowObject(source="policy_parser", raw_text="we collect email",
+                           field_name="email", pii_category=P.EMAIL,
+                           sensitivity=Sensitivity.PERSONAL)
+    return {"claims": tasks._findings_to_json([claim]), "purpose_map": {},
+            "vagueness": [], "disclosed": {}}
+
+
+def test_S7_chunks_merge_across_rounds_into_one_complete_scan(mem_db):
+    import tasks, database
+    db = mem_db()
+    scan = database.Scan(repo_url="https://github.com/o/r", policy_url="p",
+                         status="running", files_total=4, files_done=0,
+                         coverage=_json.dumps({"total_source_files": 4,
+                                               "origins": {"first_party": 4}}))
+    db.add(scan); db.commit(); sid = scan.id; db.close()
+
+    def res(scanned, unfinished=(), failed=None, cat=P.EMAIL):
+        f = [finding(cat, path=p) for p in scanned]
+        return {"findings": f, "usage_map": {cat: {"api"}}, "scanned": list(scanned),
+                "failed": failed or {}, "unfinished": list(unfinished)}
+
+    tasks.save_chunk(sid, 0, 1, res(["a.py", "b.py"]))
+    tasks.save_chunk(sid, 0, 1, res(["a.py", "b.py"]))          # re-delivered: no double count
+    tasks.save_chunk(sid, 1, 1, res([], unfinished=["c.py", "d.py"]))
+    tasks.save_chunk(sid, 1_000_000, 2, res(["c.py"], cat=P.PHONE))
+    tasks.save_chunk(sid, 1_000_001, 2, res([], unfinished=["d.py"]))
+
+    db = mem_db()
+    assert db.query(database.Scan).get(sid).files_done == 3
+    db.close()
+
+    out = tasks.complete_scan(sid, _policy_payload())
+    db = mem_db()
+    scan = db.query(database.Scan).get(sid)
+    cov = _json.loads(scan.coverage)
+    assert scan.status == "complete" and scan.findings_count == 3
+    assert cov["scanned"] == 3 and list(cov["failed"]) == ["d.py"]
+    assert "time limit" in cov["failed"]["d.py"]
+    assert "1 of 4 source files could not be scanned" in scan.error_message
+    assert db.query(database.ScanChunk).count() == 0          # cleaned up
+    assert out["coverage"]["failed"] == 1
+
+
+def test_S8_big_scan_with_recent_progress_is_not_failed(mem_db):
+    import main, database
+    from datetime import datetime, timedelta
+    db = mem_db()
+    now = datetime.utcnow()
+    long_ago = now - timedelta(hours=3)
+    busy = database.Scan(repo_url="r", policy_url="p", status="running", phase="scanning",
+                         created_at=long_ago, last_progress_at=now - timedelta(minutes=2))
+    queued = database.Scan(repo_url="r", policy_url="p", status="queued", phase="queued",
+                           created_at=long_ago, last_progress_at=long_ago)
+    db.add_all([busy, queued]); db.commit()
+    main._expire_if_stale(busy, db)
+    main._expire_if_stale(queued, db)       # waiting behind `busy`, which is moving
+    assert busy.status == "running" and queued.status == "queued"
+
+
+def test_S8_scan_with_no_progress_anywhere_is_failed(mem_db):
+    import main, database
+    from datetime import datetime, timedelta
+    db = mem_db()
+    old = datetime.utcnow() - timedelta(minutes=40)
+    dead = database.Scan(repo_url="r", policy_url="p", status="running", phase="scanning",
+                         created_at=old, last_progress_at=old)
+    db.add(dead); db.commit()
+    main._expire_if_stale(dead, db)
+    assert dead.status == "failed" and "stopped making progress" in dead.error_message
+
+
+def test_S8_progress_payload():
+    import main
+    p = main._progress(_NS(phase="scanning", status="running", files_total=5210, files_done=1840))
+    assert p == {"phase": "scanning", "files_total": 5210, "files_done": 1840, "percent": 35.3}
+
+
+
+# ── S9–S15: third-party code, duplicates, all findings, worker/DB errors ─────
+
+def test_S9_every_scannable_file_is_kept_with_its_origin():
+    c = rs.classify_path
+    assert c("src/app.py") == "first_party"
+    assert c("node_modules/sdk/index.js") == "third_party"
+    assert c("node_modules/sdk/dist/sdk.min.js") == "third_party"   # dependency wins
+    assert c("vendor/lib/a.py") == "third_party"
+    assert c("dist/app.js") == "generated"
+    assert c("static/app.bundle.js") == "generated"
+    assert c("types/index.d.ts") == "other"          # declarations: no code
+    assert c("pkg/__pycache__/a.py") == "other"
+    assert c("README.md") == "other"
+
+
+def test_S9_usage_map_is_built_from_first_party_files_only():
+    class R:
+        files = {"analytics/track.py": "email = request.form['email']\n",
+                 "node_modules/x/analytics.js": "const email = req.body.email;\n"}
+        def get_contents(self, p):
+            class C: pass
+            c = C(); c.decoded_content = self.files[p].encode(); return c
+    findings, usage, st = cs.scan_files(R(), list(R.files))
+    assert st["scanned"] == list(R.files)
+    assert {f.origin for f in findings} == {"first_party", "third_party"}
+    # usage_map has the first-party module type only
+    assert usage and all(usage.values())
+    tp = [f for f in findings if f.origin == "third_party"]
+    assert tp, "third-party file must still produce findings"
+
+
+def test_S10_identical_bundled_copies_are_scanned_once():
+    files = [
+        {"path": "app/a.py", "size": 1, "origin": "first_party", "hash": "h1"},
+        {"path": "app/b.py", "size": 1, "origin": "first_party", "hash": "h1"},  # first-party: never merged
+        {"path": "node_modules/a/u.js", "size": 1, "origin": "third_party", "hash": "h2"},
+        {"path": "node_modules/b/node_modules/a/u.js", "size": 1, "origin": "third_party", "hash": "h2"},
+        {"path": "node_modules/c/u.ts", "size": 1, "origin": "third_party", "hash": "h2"},  # other language
+    ]
+    to_scan, dups = rs.plan_unique(files)
+    assert [f["path"] for f in to_scan] == ["app/a.py", "app/b.py", "node_modules/a/u.js",
+                                            "node_modules/c/u.ts"]
+    assert dups == {"node_modules/b/node_modules/a/u.js": "node_modules/a/u.js"}
+
+
+def test_S10_duplicate_findings_are_restored_at_finalize(mem_db):
+    import tasks, database
+    db = mem_db()
+    dup = "node_modules/b/node_modules/a/u.js"
+    scan = database.Scan(repo_url="r", policy_url="p", status="running", files_total=2,
+                         files_done=0, coverage=_json.dumps({
+                             "total_source_files": 3,
+                             "origins": {"first_party": 1, "third_party": 2},
+                             "duplicates": {dup: "node_modules/a/u.js"}}))
+    db.add(scan); db.commit(); sid = scan.id; db.close()
+    f1 = finding(P.EMAIL, path="app/a.py"); f1.origin = "first_party"
+    f2 = finding(P.PHONE, path="node_modules/a/u.js"); f2.origin = "third_party"
+    tasks.save_chunk(sid, 0, 1, {"findings": [f1, f2], "usage_map": {},
+                                 "scanned": ["app/a.py", "node_modules/a/u.js"],
+                                 "failed": {}, "unfinished": []})
+    tasks.complete_scan(sid, _policy_payload())
+    db = mem_db()
+    rows = db.query(database.Finding).filter_by(scan_id=sid).all()
+    assert sorted(r.file_path for r in rows) == sorted(["app/a.py", "node_modules/a/u.js", dup])
+    assert {r.origin for r in rows if r.file_path == dup} == {"third_party"}
+    cov = _json.loads(db.query(database.Scan).get(sid).coverage)
+    assert cov["scanned"] == 3 and cov["duplicates_reused"] == 1
+
+
+def test_S11_all_findings_stored_and_rules_scoped_by_origin(mem_db):
+    import tasks, database
+    db = mem_db()
+    scan = database.Scan(repo_url="r", policy_url="p", status="running", files_total=2,
+                         files_done=0, coverage=_json.dumps({"total_source_files": 2}))
+    db.add(scan); db.commit(); sid = scan.id; db.close()
+    many = []
+    for i in range(450):                         # well past the old 200-row limit
+        f = finding(P.EMAIL, path="app/a.py"); f.line_number = i + 1; f.origin = "first_party"
+        many.append(f)
+    # PHONE only appears in third-party code, inside a call to an SDK.
+    tp = DataFlowObject(source="code_scanner", file_path="node_modules/sdk/i.js", line_number=3,
+                        raw_text="mixpanel.track(phone)", field_name="phone",
+                        pii_category=P.PHONE, sensitivity=Sensitivity.PERSONAL,
+                        third_party_sdk="mixpanel", origin="third_party")
+    tasks.save_chunk(sid, 0, 1, {"findings": many + [tp], "usage_map": {},
+                                 "scanned": ["app/a.py", "node_modules/sdk/i.js"],
+                                 "failed": {}, "unfinished": []})
+    policy = _policy_payload()                   # discloses EMAIL only
+    tasks.complete_scan(sid, policy)
+    db = mem_db()
+    scan = db.query(database.Scan).get(sid)
+    assert db.query(database.Finding).filter_by(scan_id=sid).count() == 451
+    # Rule 1 (notice gap) ignores PII seen only in third-party code ...
+    assert _json.loads(scan.gap_categories) == []
+    v = db.query(database.Violation).filter_by(scan_id=sid).all()
+    assert not any(x.dpdp_section.startswith("Section 5") for x in v)
+    # ... while Rule 2 (third-party transmission) reports it, saying where it is.
+    r2 = [x for x in v if x.dpdp_section == "Section 8(2)" and x.pii_category == P.PHONE.value]
+    assert r2 and "third-party code bundled" in r2[0].evidence
+
+
+def test_S12_worker_without_the_scan_row_fails_with_the_cause(mem_db):
+    import tasks
+    with pytest.raises(tasks.ScanRowMissing) as e:
+        tasks._require_scan(999)
+    assert "different databases" in str(e.value) and "DATABASE_URL" in str(e.value)
+    assert "pilot:pilot" not in str(e.value)          # never the credentials
+
+
+def test_S12_chord_errback_marks_the_scan_failed(mem_db):
+    import tasks, database
+    db = mem_db()
+    scan = database.Scan(repo_url="r", policy_url="p", status="running")
+    db.add(scan); db.commit(); sid = scan.id; db.close()
+    tasks.scan_failed_errback(None, RuntimeError("boom"), None, sid)
+    db = mem_db()
+    s = db.query(database.Scan).get(sid)
+    assert s.status == "failed" and "boom" in s.error_message
+
+
+def test_S12_api_reads_a_failed_task_from_celery(mem_db, monkeypatch):
+    import main, database, tasks
+    db = mem_db()
+    scan = database.Scan(repo_url="r", policy_url="p", status="queued", task_id="t-1")
+    db.add(scan); db.commit()
+
+    class _Res:
+        state = "FAILURE"
+        result = tasks.ScanRowMissing("Scan 1 does not exist in the worker's database")
+    monkeypatch.setattr(tasks.celery_app, "AsyncResult", lambda tid: _Res())
+    main._check_task_failure(scan, db)
+    assert scan.status == "failed" and "does not exist in the worker" in scan.error_message
+
+
+def test_S13_worker_database_is_compared_by_instance_id(monkeypatch):
+    import main, tasks
+    from code_version import compute
+    ver = compute()
+    main._WORKER_DB_CACHE["at"] = None
+    monkeypatch.setattr(main, "database_instance_id", lambda create=False: "A")
+    monkeypatch.setattr(main, "_redis_reachable", lambda: True)
+    monkeypatch.setattr(main, "describe_database_url", lambda: "postgresql://localhost:15432/pp")
+
+    def workers(**w):
+        monkeypatch.setattr(tasks, "worker_databases", lambda timeout=1.0: w)
+        return main._worker_db_check(force=True)
+
+    ok = workers(**{"celery@w1": {"database": "postgresql://db:5432/pp",
+                                  "instance_id": "A", "code_version": ver}})
+    assert ok["ok"] is True and ok["problem"] is None      # same DB, other host name
+    bad = workers(**{"celery@w1": {"database": "sqlite:/app/privacypilot.db",
+                                   "instance_id": "B", "code_version": ver}})
+    assert bad["ok"] is False and "different database" in bad["problem"]
+    fresh = workers(**{"celery@w1": {"database": "postgresql://db:5432/other",
+                                     "instance_id": None, "code_version": ver}})
+    assert fresh["ok"] is False and "never used by this API" in fresh["workers"]["celery@w1"]["status"]
+    assert workers()["ok"] is None
+    monkeypatch.setattr(main, "_redis_reachable", lambda: "Redis at redis://h:1/0 is not reachable: x")
+    down = workers()
+    assert down["redis_reachable"] is False and "Start Redis" in down["problem"]
+    main._WORKER_DB_CACHE["at"] = None
+
+
+def test_S13_worker_on_old_code_is_told_to_restart_not_wrong_database(monkeypatch):
+    # The reported error: a worker started before this check existed answers
+    # {"error": "KeyError('privacypilot_database')"}; that is old code, not
+    # a different database.
+    import main, tasks
+    from code_version import compute
+    monkeypatch.setattr(main, "database_instance_id", lambda create=False: "A")
+    monkeypatch.setattr(main, "_redis_reachable", lambda: True)
+    for reply in ({"error": "KeyError('privacypilot_database')"},
+                  {"database": "postgresql://db:5432/pp", "instance_id": "A",
+                   "code_version": "0ld0ld0ld0ld"}):
+        monkeypatch.setattr(tasks, "worker_databases",
+                            lambda timeout=1.0, r=reply: {"celery@2018e08112cc": r})
+        chk = main._worker_db_check(force=True)
+        assert chk["ok"] is False
+        assert "older code" in chk["problem"] and "docker compose restart worker" in chk["problem"]
+        assert "different database" not in chk["problem"]
+    main._WORKER_DB_CACHE["at"] = None
+
+
+def test_S13_code_version_ignores_line_endings(tmp_path, monkeypatch):
+    import code_version as cv
+    for d in ("scanners", "dpdp", "models"):
+        (tmp_path / d).mkdir()
+    (tmp_path / "tasks.py").write_bytes(b"a = 1\nb = 2\n")
+    monkeypatch.setattr(cv, "_ROOT", tmp_path)
+    v1 = cv.compute()
+    (tmp_path / "tasks.py").write_bytes(b"a = 1\r\nb = 2\r\n")
+    assert cv.compute() == v1
+    (tmp_path / "scanners" / "x.py").write_bytes(b"c = 3\n")
+    assert cv.compute() != v1
+
+
+def test_S13_database_description_never_contains_credentials():
+    import database
+    d = database.describe_database_url("postgresql://pilot:secret@db:5432/privacypilot")
+    assert d == "postgresql://db:5432/privacypilot" and "secret" not in d
+
+
+def test_S14_findings_endpoint_pages_and_filters(mem_db):
+    import main, database
+    db = mem_db()
+    scan = database.Scan(repo_url="r", policy_url="p", status="complete")
+    db.add(scan); db.commit()
+    for i in range(120):
+        db.add(database.Finding(scan_id=scan.id, source="code_scanner", file_path=f"app/f{i}.py",
+                                line_number=1, raw_text="x", field_name="email",
+                                pii_category="email", sensitivity="personal",
+                                origin="first_party"))
+    for i in range(30):
+        db.add(database.Finding(scan_id=scan.id, source="code_scanner",
+                                file_path=f"node_modules/x/{i}.js", line_number=1,
+                                raw_text="track(phone)", field_name="phone",
+                                pii_category="phone", sensitivity="personal",
+                                third_party_sdk="mixpanel", origin="third_party"))
+    db.commit()
+    page = main.get_scan_findings(scan.id, offset=100, limit=50, category=None, origin=None,
+                                  sensitivity=None, transmitted=False, q=None, db=db)
+    assert page["total"] == 150 and len(page["items"]) == 50
+    assert page["facets"]["origin"] == {"first_party": 120, "third_party": 30}
+    assert page["facets"]["transmitted"] == 30
+    tp = main.get_scan_findings(scan.id, offset=0, limit=500, category=None,
+                                origin="third_party", sensitivity=None, transmitted=False,
+                                q=None, db=db)
+    assert tp["total"] == 30 and all(i["origin"] == "third_party" for i in tp["items"])
+    s = main.get_scan_findings(scan.id, offset=0, limit=50, category="email", origin=None,
+                               sensitivity=None, transmitted=False, q="f11", db=db)
+    assert {i["file_path"] for i in s["items"]} == {"app/f11.py"} | {f"app/f{n}.py" for n in range(110, 120)}
+
+
+def test_S15_long_minified_line_is_analysed_in_windows(monkeypatch):
+    from scanners import presidio_scanner as ps
+    text = ("a" * 4500) + " someone@example.com " + ("b" * 4500)
+    wins = ps._windows(text)
+    assert all(len(w) <= ps.NER_WINDOW_CHARS for _, w in wins)
+    assert "".join(w for _, w in wins[:1]) == text[:ps.NER_WINDOW_CHARS]
+    assert wins[-1][0] + len(wins[-1][1]) == len(text)               # reaches the end
+    at = text.index("someone@")
+
+    class _R:
+        def __init__(self, s, e): self.entity_type, self.start, self.end, self.score = "EMAIL_ADDRESS", s, e, 0.9
+
+    class _A:
+        def analyze(self, text, language, entities):
+            i = text.find("someone@example.com")
+            return [_R(i, i + 19)] if i >= 0 else []
+    monkeypatch.setattr(ps, "get_analyzer", lambda: _A())
+    import presidio_analyzer
+    monkeypatch.setattr(presidio_analyzer, "BatchAnalyzerEngine",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("no batch")), raising=False)
+    out = ps.scan_lines_with_presidio_spans([text], ner_mask=[True])[0]
+    assert ("EMAIL_ADDRESS", at, at + 19) in out
+    assert len([o for o in out if o[0] == "EMAIL_ADDRESS"]) == 1    # overlap: not doubled

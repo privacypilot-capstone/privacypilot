@@ -4,10 +4,17 @@ from datetime import datetime
 import json
 import os
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite:///./privacypilot.db"   # local dev default; override in .env for Postgres
-)
+# Every entry point (API, worker, scripts) must read the same settings, so the
+# database module loads backend/.env itself rather than relying on whoever
+# imported it first. Variables already set (e.g. by docker compose) win.
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+# Default: a SQLite file next to this module. (It used to be relative to the
+# current directory, so starting the API from another folder silently created
+# and used a second, empty database.)
+_DEFAULT_SQLITE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "privacypilot.db")
+DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{_DEFAULT_SQLITE}"
 # SQLAlchemy 2.x maps plain postgresql:// → psycopg3; we ship psycopg2, so
 # rewrite the scheme to use the psycopg2 dialect explicitly.
 if DATABASE_URL.startswith("postgresql://"):
@@ -35,11 +42,25 @@ class Scan(Base):
     gaps_count       = Column(Integer, default=0)
     violations_count = Column(Integer, default=0)
     # JSON list of PII categories in code but absent from the policy. Stored
-    # explicitly because only the first 200 findings are persisted, so
-    # rebuilding the list from Finding.is_gap could miss categories that
-    # gaps_count includes.
+    # explicitly (scans saved by older versions persisted only their first
+    # 200 findings, so Finding.is_gap alone could miss categories).
     gap_categories   = Column(Text, nullable=True)
-    
+
+    # ── Progress of a chunked scan (tasks.py) ────────────────────────────
+    # phase: queued → downloading → scanning → finalizing → complete/failed
+    phase            = Column(String, nullable=True)
+    files_total      = Column(Integer, nullable=True)   # source files to scan
+    files_done       = Column(Integer, default=0)       # scanned or failed so far
+    chunks_total     = Column(Integer, nullable=True)
+    # Heartbeat: updated on every completed chunk and during the download.
+    # A scan is declared dead only when THIS stops moving, never because
+    # the repository is big and the scan is simply taking long.
+    last_progress_at = Column(DateTime, nullable=True)
+    coverage         = Column(Text, nullable=True)      # JSON, see coverage_note()
+    # Celery id of the orchestrator task, so the API can ask Celery whether
+    # it failed (e.g. on a worker that cannot see this scan row).
+    task_id          = Column(String, nullable=True)
+
 
     findings   = relationship("Finding",   back_populates="scan")
     ai_summary = Column(Text, nullable=True)   # cached LLM executive summary
@@ -47,11 +68,31 @@ class Scan(Base):
     violations = relationship("Violation", back_populates="scan")
 
 
+class ScanChunk(Base):
+    """
+    Result of one chunk task: the findings of a batch of files. Kept in the
+    database (not passed through Celery) so the finalize step can combine
+    any number of chunks, from any worker, across retry rounds.
+    """
+    __tablename__ = "scan_chunks"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    scan_id     = Column(Integer, ForeignKey("scans.id"), index=True, nullable=False)
+    chunk_no    = Column(Integer, nullable=False)
+    round       = Column(Integer, default=1)
+    findings    = Column(Text, nullable=True)   # JSON list of DataFlowObject dicts
+    usage_map   = Column(Text, nullable=True)   # JSON {category: [module types]}
+    scanned     = Column(Text, nullable=True)   # JSON list of paths
+    failed      = Column(Text, nullable=True)   # JSON {path: reason}
+    unfinished  = Column(Text, nullable=True)   # JSON list of paths (hit the time limit)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+
 class Finding(Base):
     __tablename__ = "findings"
 
     id               = Column(Integer, primary_key=True, index=True)
-    scan_id          = Column(Integer, ForeignKey("scans.id"))
+    scan_id          = Column(Integer, ForeignKey("scans.id"), index=True)
     source           = Column(String)
     file_path        = Column(String, nullable=True)
     line_number      = Column(Integer, nullable=True)
@@ -61,6 +102,9 @@ class Finding(Base):
     sensitivity      = Column(String)
     third_party_sdk  = Column(String, nullable=True)
     is_gap           = Column(Boolean, nullable=True)
+    # first_party | third_party | generated (repo_snapshot.classify_path);
+    # NULL on scans saved before third-party code was scanned.
+    origin           = Column(String, nullable=True)
 
     scan = relationship("Scan", back_populates="findings")
 
@@ -79,6 +123,19 @@ class Violation(Base):
 
     scan = relationship("Scan", back_populates="violations")
 
+
+
+class InstanceMeta(Base):
+    """
+    One row, key 'instance_id': a random id created the first time the API
+    starts against a database. The API and the worker each read it; equal ids
+    prove they use the same database, whatever host name each one uses to
+    reach it (localhost:15432 from the host vs db:5432 inside Docker).
+    """
+    __tablename__ = "privacypilot_meta"
+
+    key   = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
 
 
 # ── Chat tables (LLM compliance chatbot) ─────────────────────────────────────
@@ -118,6 +175,17 @@ def migrate_tables():
         "ALTER TABLE scans ADD COLUMN ai_summary TEXT",
         "ALTER TABLE scans ADD COLUMN error_message TEXT",
         "ALTER TABLE scans ADD COLUMN gap_categories TEXT",
+        "ALTER TABLE scans ADD COLUMN phase VARCHAR",
+        "ALTER TABLE scans ADD COLUMN files_total INTEGER",
+        "ALTER TABLE scans ADD COLUMN files_done INTEGER DEFAULT 0",
+        "ALTER TABLE scans ADD COLUMN chunks_total INTEGER",
+        "ALTER TABLE scans ADD COLUMN last_progress_at TIMESTAMP",
+        "ALTER TABLE scans ADD COLUMN coverage TEXT",
+        "ALTER TABLE scans ADD COLUMN task_id VARCHAR",
+        "ALTER TABLE findings ADD COLUMN origin VARCHAR",
+        # The results page pages through a scan's findings; without this an
+        # index-less scan of every finding of every scan runs per page.
+        "CREATE INDEX IF NOT EXISTS ix_findings_scan_id ON findings (scan_id)",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -134,7 +202,44 @@ def migrate_tables():
                 # poisons every migration listed after it, regardless of
                 # whether they themselves would have succeeded.
                 conn.rollback()
-                print(f"[db] migration skipped: {e}")
+                msg = str(e).lower()
+                if not any(t in msg for t in ("already exists", "duplicate column")):
+                    print(f"[db] migration skipped: {e}")
+
+
+def describe_database_url(url: str | None = None) -> str:
+    """The database a process is using, safe to log or show: dialect, host,
+    port and database name — never the user name or password."""
+    from sqlalchemy.engine import make_url
+    try:
+        u = make_url(url or DATABASE_URL)
+    except Exception:
+        return "unparseable DATABASE_URL"
+    if u.get_backend_name() == "sqlite":
+        return f"sqlite:{os.path.abspath(u.database) if u.database else ':memory:'}"
+    return f"{u.get_backend_name()}://{u.host or 'localhost'}:{u.port or ''}/{u.database or ''}"
+
+
+def database_instance_id(create: bool = False) -> str | None:
+    """This database's PrivacyPilot instance id (see InstanceMeta); created
+    when `create` is set and missing. None if absent or unreadable."""
+    import uuid
+    db = SessionLocal()
+    try:
+        row = db.get(InstanceMeta, "instance_id")
+        if row is None and create:
+            db.add(InstanceMeta(key="instance_id", value=uuid.uuid4().hex))
+            try:
+                db.commit()
+            except Exception:          # another API process created it first
+                db.rollback()
+            row = db.get(InstanceMeta, "instance_id")
+        return row.value if row else None
+    except Exception:
+        db.rollback()
+        return None
+    finally:
+        db.close()
 
 
 def scan_gap_categories(scan, findings=None) -> list[str]:

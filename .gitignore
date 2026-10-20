@@ -37,3 +37,11 @@ env/
 
 # Eval inputs can contain a GitHub token
 eval/repos.json
+
+# Local-only state and settings: never committed
+# (backend/.env is covered by ".env" above; copy backend/.env.example to create it)
+*.db
+*.sqlite3
+docker-compose.override.yml
+docker-compose.local.yml
+frontend/.env.local

@@ -119,6 +119,19 @@ def _is_logger_sink(sdk: str | None, raw_text: str = "") -> bool:
     return sink_kind(sdk) == 'logger'
 
 
+_ORIGIN_NOTE = {
+    "third_party": (" This call is inside third-party code bundled in the repository "
+                    "(e.g. a vendored SDK or node_modules package); the Data Fiduciary "
+                    "is responsible for what the software it ships transmits."),
+    "generated":   (" This call is in generated/built code (e.g. dist/ or a minified "
+                    "bundle) committed to the repository."),
+}
+
+
+def _origin_note(finding) -> str:
+    return _ORIGIN_NOTE.get(getattr(finding, "origin", None) or "", "")
+
+
 def run_dpdp_rules(
     code_findings: list,
     policy_claims: list,
@@ -146,6 +159,17 @@ def run_dpdp_rules(
                          PII+SDK pairing as "undisclosed" when the policy already
                          discloses it.
 
+    Third-party and generated code
+    ------------------------------
+    code_findings may include findings from bundled third-party and generated
+    files (finding.origin). Rule 2 uses ALL of them — a vendored SDK sending
+    personal data out is a third-party transmission wherever its code lives —
+    and says in the evidence when the call is in third-party code. Rules 1
+    and 3 concern what the application itself collects and why, so the
+    caller computes gap_categories and usage_map from first-party code only.
+    Pass first-party findings first so the location each violation cites is
+    in the application's own code whenever one exists.
+
     Returns
     -------
     list[DPDPViolation]
@@ -155,8 +179,12 @@ def run_dpdp_rules(
 
     # Build a location index: {PIICategory → [(file_path, line_number), ...]}
     # Used by Rule 3 to cite concrete evidence locations in violation messages.
+    # Only the application's own code is cited: Rule 3 is about how the
+    # application uses the data, not about a bundled library's internals.
     _loc_index: dict = {}
     for _f in code_findings:
+        if getattr(_f, "origin", None) not in (None, "first_party"):
+            continue
         _loc_index.setdefault(_f.pii_category, []).append(
             (_f.file_path, _f.line_number)
         )
@@ -232,7 +260,7 @@ def run_dpdp_rules(
                     pii_category=cat.value,
                     evidence=(
                         f"'{cat.value}' data appears in a log/print statement "
-                        f"at {loc}. Logging personal data exposes it in log files, "
+                        f"at {loc}.{_origin_note(finding)} Logging personal data exposes it in log files, "
                         f"monitoring dashboards, and log-aggregation services. "
                         f"Section 8(5) requires the Data Fiduciary to take "
                         f"reasonable security safeguards to prevent personal "
@@ -279,7 +307,8 @@ def run_dpdp_rules(
                         severity="medium",
                         pii_category=cat.value,
                         evidence=(
-                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
+                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}."
+                            f"{_origin_note(finding)} "
                             f"The privacy policy already names '{sdk}' as a "
                             f"recipient of this data. Section 8(2) permits a Data "
                             f"Processor to be engaged only under a valid contract, "
@@ -318,7 +347,8 @@ def run_dpdp_rules(
                         severity=severity,
                         pii_category=cat.value,
                         evidence=(
-                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
+                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}."
+                            f"{_origin_note(finding)} "
                             f"{_policy_clause} Section 8(2) permits a Data "
                             f"Processor to be engaged only under a valid contract, "
                             f"and under Section 8(1) the Data Fiduciary remains "

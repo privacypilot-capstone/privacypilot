@@ -213,6 +213,24 @@ NER_ENTITIES = ["PERSON", "LOCATION", "PHONE_NUMBER", "EMAIL_ADDRESS",
                 "IN_AADHAAR", "IN_PAN", "MEDICAL_LICENSE"]
 
 
+# A single "line" can be a whole minified bundle (hundreds of KB). spaCy's
+# cost and memory grow with the text, and a text over its max_length
+# (1,000,000 chars) is rejected outright. Long texts are therefore analysed
+# in overlapping windows; spans are mapped back to offsets in the original
+# text, and the overlap means an entity cut by one window boundary is seen
+# whole in the next window.
+NER_WINDOW_CHARS = 2000
+NER_WINDOW_OVERLAP = 200
+
+
+def _windows(text: str) -> list[tuple[int, str]]:
+    if len(text) <= NER_WINDOW_CHARS:
+        return [(0, text)]
+    step = NER_WINDOW_CHARS - NER_WINDOW_OVERLAP
+    return [(o, text[o:o + NER_WINDOW_CHARS]) for o in range(0, len(text), step)
+            if o == 0 or o + NER_WINDOW_OVERLAP < len(text)]
+
+
 def scan_lines_with_presidio_spans(
     texts: list[str],
     ner_mask: list[bool] | None = None,
@@ -237,20 +255,26 @@ def scan_lines_with_presidio_spans(
     idx = [i for i in range(len(texts)) if ner_mask is None or ner_mask[i]]
     if not analyzer or not idx:
         return found
-    sub = [texts[i] for i in idx]
+    # Flatten every selected text into windows (one window for a normal line).
+    owners, offsets, sub = [], [], []
+    for i in idx:
+        for off, piece in _windows(texts[i]):
+            owners.append(i); offsets.append(off); sub.append(piece)
     try:
         from presidio_analyzer import BatchAnalyzerEngine
         batch = BatchAnalyzerEngine(analyzer_engine=analyzer).analyze_iterator(
             sub, language="en", entities=NER_ENTITIES)
     except Exception:
         batch = None
-    for j, i in enumerate(idx):
-        text = texts[i]
+    for j, (i, off, piece) in enumerate(zip(owners, offsets, sub)):
         try:
             results = (batch[j] if batch is not None
-                       else analyzer.analyze(text=text, language="en", entities=NER_ENTITIES))
+                       else analyzer.analyze(text=piece, language="en", entities=NER_ENTITIES))
         except Exception as e:
             print(f"[presidio] Analysis error: {e}")
             continue
-        found[i].extend(_ner_spans(text, results))
+        for ent, s0, e0 in _ner_spans(piece, results):
+            span = (ent, s0 + off, e0 + off)
+            if span not in found[i]:          # the same entity seen in two windows
+                found[i].append(span)
     return found

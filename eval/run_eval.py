@@ -26,19 +26,23 @@ is never silently shaped around the expected answer.
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 import requests
 
-API = "http://localhost:8000"
+API = os.getenv("PRIVACYPILOT_API", "http://localhost:8000")
 HERE = Path(__file__).parent
 REPOS_FILE = HERE / "repos.json"
 RESULTS_DIR = HERE / "results"
 
 POLL_INTERVAL_SEC = 5
-POLL_TIMEOUT_SEC = 600  # matches the Celery task's own 10-minute hard limit
+# No overall time limit — a large repository just takes longer. Give up only
+# if the scan's progress (phase / files scanned) has not moved for this long.
+# The server applies the same rule and marks a stalled scan "failed".
+STALL_TIMEOUT_SEC = 20 * 60
 
 
 def run_one_scan(repo_url: str, policy_url: str, github_token: str | None) -> dict:
@@ -60,19 +64,25 @@ def run_one_scan(repo_url: str, policy_url: str, github_token: str | None) -> di
     scan_id = resp.json()["scan_id"]
     print(f"    scan_id={scan_id} enqueued, polling status...")
 
-    deadline = time.time() + POLL_TIMEOUT_SEC
-    status_payload = {}
-    while time.time() < deadline:
+    status_payload, last_marker, last_change = {}, None, time.time()
+    while True:
         s = requests.get(f"{API}/scans/{scan_id}/status", timeout=15)
         s.raise_for_status()
         status_payload = s.json()
         status = status_payload.get("status")
-        print(f"      status={status}")
+        prog = status_payload.get("progress") or {}
+        marker = (status, prog.get("phase"), prog.get("files_done"))
+        if marker != last_marker:
+            last_marker, last_change = marker, time.time()
+            files = (f" {prog.get('files_done')}/{prog.get('files_total')} files"
+                     if prog.get("files_total") is not None else "")
+            print(f"      status={status} phase={prog.get('phase')}{files}")
         if status in ("complete", "failed"):
             break
+        if time.time() - last_change > STALL_TIMEOUT_SEC:
+            raise TimeoutError(
+                f"scan {scan_id} made no progress for {STALL_TIMEOUT_SEC // 60} minutes")
         time.sleep(POLL_INTERVAL_SEC)
-    else:
-        raise TimeoutError(f"scan {scan_id} did not finish within {POLL_TIMEOUT_SEC}s")
 
     if status == "failed":
         err = status_payload.get("error_message") or "(no error_message recorded)"

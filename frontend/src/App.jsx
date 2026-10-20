@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from './Layout';
 import ResultsDashboard from './components/ResultsDashboard';
@@ -6,7 +6,7 @@ import ResultsDashboard from './components/ResultsDashboard';
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const SCAN_STEPS = [
-  { label: 'Cloning repository',        sub: 'Fetching files via GitHub API' },
+  { label: 'Downloading repository',    sub: 'Fetching the whole repository as one archive' },
   { label: 'Scanning for PII',          sub: 'Running regex + NER classifiers' },
   { label: 'Parsing privacy policy',    sub: 'Extracting PII disclosures' },
   { label: 'Detecting consent gaps',    sub: 'Comparing code vs. policy claims' },
@@ -68,25 +68,18 @@ export default function App() {
   const [policy,   setPolicy] = useState('');
   const [token,    setToken]  = useState('');
   const [loading,  setLoad]   = useState(false);
-  const [stepIdx,  setStep]   = useState(0);
+  const [live,     setLive]   = useState(null);   // server progress: {phase, files_done, files_total, percent}
   const [result,   setResult] = useState(null);
   const [error,    setError]  = useState('');
   const [aiSummary, setAiSummary] = useState(null);
   const [aiLoading, setAiLoad]    = useState(false);
   const [aiError,   setAiError]   = useState('');
-  const stepTimer = useRef(null);
-
-  useEffect(() => {
-    if (loading) {
-      setStep(0);
-      stepTimer.current = setInterval(() => {
-        setStep(s => s < SCAN_STEPS.length - 1 ? s + 1 : s);
-      }, 25000);
-    } else {
-      clearInterval(stepTimer.current);
-    }
-    return () => clearInterval(stepTimer.current);
-  }, [loading]);
+  // Which step is active comes from the scan's real phase on the server
+  // (not a timer): downloading → scanning (with file counts) → finalizing.
+  const phase   = live?.phase || 'queued';
+  const stepIdx = phase === 'finalizing' ? 4
+                : phase === 'scanning'   ? 1
+                : 0;
 
   const fetchAI = async (scanId) => {
     setAiLoad(true);
@@ -111,6 +104,7 @@ export default function App() {
     setResult(null);
     setAiSummary(null);
     setAiError('');
+    setLive(null);
     setLoad(true);
     try {
       // ── Step 1: Enqueue the scan (returns immediately with scan_id) ──
@@ -129,20 +123,20 @@ export default function App() {
       }
       const { scan_id } = await r.json();
 
-      // ── Step 2: Poll until complete or failed (max ~10 min) ──
+      // ── Step 2: Poll until complete or failed ──
+      // No fixed time limit: a large repository simply takes longer. The
+      // server marks a scan failed only when it stops making progress, so
+      // polling ends either way.
       const POLL_INTERVAL = 4000;   // ms between polls
-      const MAX_POLLS     = 150;    // 150 × 4 s = 10 min timeout
-      let attempts = 0;
-      while (attempts < MAX_POLLS) {
+      for (;;) {
         await new Promise(res => setTimeout(res, POLL_INTERVAL));
         const sr = await fetch(`${API}/scans/${scan_id}/status`);
         if (!sr.ok) throw new Error(`Status check failed: ${sr.status}`);
         const sd = await sr.json();
+        setLive(sd.progress || null);
         if (sd.status === 'complete') break;
         if (sd.status === 'failed')   throw new Error(sd.error_message || 'The scan worker encountered an error. Check backend logs.');
-        attempts++;
       }
-      if (attempts >= MAX_POLLS) throw new Error('Scan timed out after 10 minutes. The repository may be too large.');
 
       // ── Step 3: Fetch full result ──
       const rr = await fetch(`${API}/scans/${scan_id}/result`);
@@ -161,7 +155,14 @@ export default function App() {
   };
 
   const canScan  = repo.trim() && policy.trim() && token.trim() && !loading;
-  const progress = ((stepIdx + 1) / SCAN_STEPS.length) * 100;
+  const progress = phase === 'finalizing' ? 95
+                 : phase === 'scanning'   ? 10 + 0.8 * (live?.percent ?? 0)
+                 : 5;
+  const stepSub  = phase === 'scanning' && live?.files_total != null
+                 ? `${live.files_done.toLocaleString()} of ${live.files_total.toLocaleString()} source files scanned`
+                 : phase.startsWith('waiting')
+                 ? 'Waiting for the GitHub API rate limit to reset'
+                 : SCAN_STEPS[stepIdx].sub;
 
   /* ─── Results view (keeps sidebar Layout) ─────────────────── */
   if (result && !loading) {
@@ -224,7 +225,7 @@ export default function App() {
             </div>
 
             <div className="sa-loading-step-label">{SCAN_STEPS[stepIdx].label}</div>
-            <div className="sa-loading-step-sub">{SCAN_STEPS[stepIdx].sub}</div>
+            <div className="sa-loading-step-sub">{stepSub}</div>
 
             <div className="sa-prog-track">
               <div className="sa-prog-bar" style={{ width: `${progress}%` }}>

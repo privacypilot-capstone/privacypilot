@@ -28,17 +28,16 @@ Additional:
   - Verhoeff checksum validation for Aadhaar numbers (both passes;
     shared implementation in presidio_scanner.verhoeff_checksum_valid)
   - Returns (findings, usage_map) for Rule 3 cross-reference
+
+Scale: this module scans a given LIST of files (scan_files). Getting the
+repository onto disk (scanners/repo_snapshot.py) and spreading the files over
+many short Celery tasks (tasks.py) happen elsewhere, so there is no file-count
+cap and no whole-scan deadline here.
 """
 
 import ast
-import concurrent.futures
-import io
-import os
 import re
-import tarfile
 
-import requests
-from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.presidio_scanner import scan_lines_with_presidio_spans, verhoeff_checksum_valid
 from scanners.sinks import canonical_sink, sink_kind
@@ -947,8 +946,7 @@ def _scan_single_file(
     Scan one file from the git tree.
 
     Runs Pass 1 (regex), Pass 2 (Presidio NER), and AST taint analysis
-    for a single file.  Called concurrently by scan_github_repo via
-    ThreadPoolExecutor.
+    for a single file.  Called by scan_files() for every file of a chunk.
 
     Returns
     -------
@@ -1134,208 +1132,97 @@ def _scan_single_file(
 
 # ── Main scanner ──────────────────────────────────────────────────────────────
 
-# Per-file GitHub API fallback (used only if the tarball download fails):
-# one request per file, so it stays capped.
-MAX_API_FILES = 300
-MAX_FILES = MAX_API_FILES          # older name
-# Whole-repository tarball: one request for everything.
-MAX_TARBALL_FILES = 20000
-MAX_TARBALL_BYTES = 500 * 1024 * 1024
-MAX_SOURCE_FILE_BYTES = 1024 * 1024   # larger "source" files are generated/bundled
-_SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "__pycache__", ".git",
-              "site-packages", "bower_components", ".venv", "venv", "coverage", ".next"}
-_SKIP_SUFFIXES = (".min.js", ".bundle.js", ".d.ts")
-
-
-class _LocalSources:
-    """Stands in for a PyGithub repo in _scan_single_file: get_contents()
-    serves files already downloaded in the tarball."""
-    def __init__(self, files: dict[str, bytes]): self._files = files
-
-    def get_contents(self, path):
-        return _LocalContent(self._files[path])
-
-
-class _LocalContent:
-    def __init__(self, data: bytes): self.decoded_content = data
-
-
 class _LocalFile:
     type = "blob"
     def __init__(self, path: str): self.path = path
 
 
-def _fetch_sources_tarball(repo) -> dict[str, bytes] | None:
+def scan_files(reader, paths: list[str]) -> tuple[list, dict, dict]:
     """
-    Download the repository's default branch as ONE tarball and return
-    {path → bytes} for every source file worth scanning (vendored, minified,
-    generated and oversized files skipped). Nothing is written to disk.
+    Scan every file in `paths`, one after another, reading each through
+    `reader.get_contents(path)` (a repo_snapshot.SnapshotReader in
+    production).
 
-    Fetching file by file costs one API request each (PyGithub also spaces
-    requests 0.25 s apart), which is what forced the old 300-file cap.
-    Returns None on any failure so the caller can fall back to the API.
-    """
-    try:
-        url = repo.get_archive_link("tarball", ref=repo.default_branch)
-        resp = requests.get(url, stream=True, timeout=60)
-        resp.raise_for_status()
-        buf, total = io.BytesIO(), 0
-        for chunk in resp.iter_content(chunk_size=1 << 20):
-            total += len(chunk)
-            if total > MAX_TARBALL_BYTES:
-                print(f"[scanner] tarball larger than {MAX_TARBALL_BYTES >> 20} MB; using the API")
-                return None
-            buf.write(chunk)
-        buf.seek(0)
-        sources: dict[str, bytes] = {}
-        with tarfile.open(fileobj=buf, mode="r:*") as tar:
-            for member in tar:
-                if not member.isfile() or member.name.startswith('/'):
-                    continue
-                parts = member.name.split('/')[1:]          # drop "owner-repo-sha/"
-                if not parts or any(p in ('', '.', '..') for p in parts):
-                    continue
-                path = '/'.join(parts)
-                if (not path.endswith(SCAN_EXTS) or path.endswith(_SKIP_SUFFIXES)
-                        or any(p in _SKIP_DIRS for p in parts[:-1])
-                        or member.size > MAX_SOURCE_FILE_BYTES):
-                    continue
-                fh = tar.extractfile(member)
-                if fh is not None:
-                    sources[path] = fh.read()
-        print(f"[scanner] tarball: {total / 1e6:.1f} MB, {len(sources)} source files")
-        return sources
-    except Exception as e:
-        print(f"[scanner] tarball download failed ({e}); falling back to per-file API")
-        return None
-
-
-# PyGithub's default retry (GithubRetry) SLEEPS until the rate limit resets
-# — up to an hour — when GitHub answers "rate limit exceeded". Inside a
-# Celery task with a 10-minute hard limit that is indistinguishable from a
-# hang. Retry only transient server errors; rate limits are checked up front.
-try:
-    from urllib3.util.retry import Retry as _Retry
-    _GITHUB_RETRY = _Retry(total=3, backoff_factor=1,
-                           status_forcelist=(500, 502, 503, 504), allowed_methods=None)
-except Exception:  # pragma: no cover
-    _GITHUB_RETRY = 3
-
-
-def coverage_note(coverage: dict) -> str | None:
-    """Human-readable note when not every source file was scanned."""
-    total, scanned = coverage["total_source_files"], coverage["scanned"]
-    if scanned >= total:
-        return None
-    reasons = []
-    if coverage["selected"] < total:
-        reasons.append(f"the {coverage.get('file_limit', MAX_API_FILES)}-file limit")
-    if coverage["skipped_time"]:
-        reasons.append(f"the time limit ({coverage['skipped_time']} files not reached)")
-    if coverage["failed"]:
-        reasons.append(f"{coverage['failed']} files that could not be fetched or parsed")
-    return (f"Partial scan: {scanned} of {total} source files were scanned "
-            f"({'; '.join(reasons)}). Findings cover only the scanned files.")
-
-
-def scan_github_repo(
-    repo_url: str,
-    github_token: str,
-    deadline: float | None = None,
-) -> tuple[list[DataFlowObject], dict[PIICategory, set[str]], dict]:
-    """
-    Scan a GitHub repository for PII.
-
-    deadline : time.monotonic() value after which files not yet started are
-               skipped (the scan then returns what it has, instead of being
-               killed by Celery's hard time limit with nothing saved).
+    Sequential on purpose: the work is CPU-bound, so threads only contend
+    for the GIL. Parallelism comes from running many of these calls in
+    separate Celery worker processes, one per chunk of files.
 
     Returns
     -------
-    findings  : list[DataFlowObject]  — all PII occurrences (pass 1 + pass 2 + taint)
-    usage_map : dict[PIICategory, set[str]]  — how each PII category is used
-                (e.g. {PIICategory.EMAIL → {'analytics', 'notification'}})
-    coverage  : {"total_source_files", "selected", "scanned", "skipped_time",
-                 "failed"} — see coverage_note()
+    findings  : list[DataFlowObject]
+    usage_map : {PIICategory → set[module_type]} — first-party files only:
+                it describes how the APPLICATION uses each category (Rule 3),
+                and a bundled library's internals say nothing about that.
+    status    : {"scanned": [path...], "failed": {path: reason}}
+
+    Every finding carries `origin` (first_party / third_party / generated,
+    from repo_snapshot.classify_path), so third-party code is scanned and
+    reported but kept apart where the rules need the application's own code.
     """
-    import time
+    from scanners.repo_snapshot import RateLimited, classify_path
 
-    findings: list[DataFlowObject] = []
-    # usage_map accumulates module types per PII category across the whole repo
-    usage_map: dict[PIICategory, set[str]] = {}
-
-    repo_name = repo_url.rstrip('/').split('github.com/')[-1]
-    g = Github(github_token or None, retry=_GITHUB_RETRY)
-    repo = g.get_repo(repo_name)
-
-    sources = _fetch_sources_tarball(repo)
-    if sources is not None:
-        # Whole repository from one download; scanning is CPU-bound now, so
-        # a few threads suffice (more only contend for the GIL).
-        all_files = [_LocalFile(p) for p in sorted(sources)]
-        file_limit = MAX_TARBALL_FILES
-        reader = _LocalSources(sources)
-        max_workers = min(8, os.cpu_count() or 4)
-    else:
-        tree = repo.get_git_tree(sha="HEAD", recursive=True).tree
-        all_files = [
-            f for f in tree
-            if f.type == "blob" and f.path.endswith(SCAN_EXTS)
-        ]
-        file_limit = MAX_API_FILES
-        reader = repo
-        max_workers = 16
-    target_files = all_files[:file_limit]
-    print(f"[scanner] {len(target_files)} of {len(all_files)} source files to scan in {repo_name}")
-
-    if sources is None:
-        # Each file costs one API request. Fail fast with a clear message
-        # rather than starting a scan that will stall on the rate limit.
+    findings: list = []
+    usage_map: dict = {}
+    status = {"scanned": [], "failed": {}}
+    for path in paths:
         try:
-            core = g.get_rate_limit().core
-            remaining, reset = core.remaining, core.reset
-        except Exception:
-            remaining, reset = None, None
-        if remaining is not None and remaining < len(target_files):
-            raise ValueError(
-                f"GitHub API rate limit too low: {remaining} requests left (resets at "
-                f"{reset} UTC) but this scan needs about {len(target_files)}. "
-                + ("Provide a GitHub personal access token (5,000 requests/hour)."
-                   if not github_token else "Wait for the reset and try again.")
-            )
+            file_findings, file_usage = _scan_single_file(reader, _LocalFile(path), raise_errors=True)
+        except RateLimited:
+            raise                      # the Celery task waits for the reset and retries
+        except Exception as e:
+            status["failed"][path] = f"{type(e).__name__}: {e}"[:300]
+            print(f"[scanner] could not scan {path}: {e}")
+            continue
+        origin = classify_path(path)
+        if origin == "other":           # a path given directly (tests, scripts)
+            origin = "first_party"
+        for f in file_findings:
+            f.origin = origin
+        findings.extend(file_findings)
+        if origin == "first_party":
+            for cat, mods in file_usage.items():
+                usage_map.setdefault(cat, set()).update(mods)
+        status["scanned"].append(path)
+    return findings, usage_map, status
 
-    coverage = {"total_source_files": len(all_files), "selected": len(target_files),
-                "scanned": 0, "skipped_time": 0, "failed": 0}
-    if file_limit != MAX_API_FILES:
-        coverage["file_limit"] = file_limit
 
-    def _scan_or_skip(file_obj):
-        if deadline is not None and time.monotonic() > deadline:
-            return None
-        return _scan_single_file(reader, file_obj, raise_errors=True)
+def coverage_note(coverage: dict) -> str | None:
+    """
+    Human-readable note for the result page. Every scannable file is always
+    attempted (third-party and generated files included); this only explains
+    files that could not be scanned (unreadable or unparseable, or still over
+    the per-file time limit after a retry). None when every file was scanned.
+    """
+    total = coverage.get("total_source_files", 0)
+    failed = coverage.get("failed") or {}
+    if not failed:
+        return None
+    return (
+        f"Scan coverage: {len(failed)} of {total} source files could not be scanned "
+        f"(e.g. {next(iter(failed))}: {next(iter(failed.values()))})."
+    )
 
-    # ── Parallel file scanning via ThreadPoolExecutor ─────────────────────
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_file = {
-            pool.submit(_scan_or_skip, f): f
-            for f in target_files
-        }
-        for future in concurrent.futures.as_completed(future_to_file):
-            file_obj = future_to_file[future]
-            try:
-                result = future.result()
-                if result is None:
-                    coverage["skipped_time"] += 1
-                    continue
-                file_findings, file_usage_map = result
-                coverage["scanned"] += 1
-                findings.extend(file_findings)
-                for cat, mods in file_usage_map.items():
-                    usage_map.setdefault(cat, set()).update(mods)
-            except Exception as exc:
-                coverage["failed"] += 1
-                print(f"[scanner] skipped {file_obj.path}: {exc}")
 
-    print(f"[scanner] Done — {len(findings)} PII findings; coverage {coverage}")
-    print(f"[scanner] usage_map: { {k.value: v for k, v in usage_map.items()} }")
+def scan_github_repo(repo_url: str, github_token: str | None):
+    """
+    Synchronous whole-repository scan (no file cap, no deadline) for scripts
+    and tests. Production scans go through tasks.run_scan_task, which runs
+    the same scan_files() over many parallel chunk tasks.
+
+    Returns (findings, usage_map, coverage).
+    """
+    from scanners import repo_snapshot as rs
+
+    ref = rs.resolve_repo(repo_url, github_token)
+    manifest = rs.ensure_snapshot(ref, github_token)
+    paths = [f["path"] for f in manifest["files"]]
+    findings, usage_map, status = scan_files(rs.SnapshotReader(ref, github_token), paths)
+    coverage = {
+        "total_source_files": len(paths),
+        "scanned": len(status["scanned"]),
+        "failed": status["failed"],
+        "origins": manifest.get("origins", {}),
+    }
+    print(f"[scanner] Done — {len(findings)} PII findings; "
+          f"{coverage['scanned']}/{coverage['total_source_files']} files")
     return findings, usage_map, coverage

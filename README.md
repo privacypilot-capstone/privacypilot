@@ -32,11 +32,60 @@ docker compose up               # backend, worker, Postgres, Redis
 cd frontend && npm install && npm run dev
 ```
 
+### API and worker must share one database and the same code
+
+The API creates each scan's row; the worker updates it and stores chunk results that reference it. Both must use the same database and run the same code.
+
+**Local settings stay out of git.** Put anything specific to your machine in git-ignored files:
+
+- `backend/.env`: copy `backend/.env.example`. When the API runs on the host and the worker in Docker, set `DATABASE_URL` to the Docker Postgres as seen from the host, e.g. `postgresql://pilot:pilot@localhost:15432/privacypilot` if your override maps port 15432.
+- `docker-compose.override.yml` (or `docker-compose.local.yml`): port changes and other compose overrides. `docker compose` applies `docker-compose.override.yml` automatically.
+- `frontend/.env.local`: `VITE_API_URL` if the API is not on `http://localhost:8000`.
+
+**What the API checks** (`GET /health` → `database`; `POST /scan` is refused with HTTP 503 and the reason while a check fails):
+
+| Shown | Cause | Fix |
+|---|---|---|
+| "running older code … restart it" | The worker was started before the code changed. Celery never reloads code, while `uvicorn --reload` does. | `docker compose restart worker` |
+| "different database" | The worker's database is not the API's. They are compared by an instance id stored in the database, so `localhost:15432` and `db:5432` are correctly the same. | Same `DATABASE_URL` for both |
+| "Redis … is not reachable" | Redis is down or `REDIS_URL` is wrong | Start Redis / fix `REDIS_URL` |
+| "No scan worker answered" | No worker is running. The scan is queued and waits. | Start the worker |
+
+If a worker still gets a scan it cannot see, it stops with "Scan N does not exist in the worker's database …" and the API shows that error at once. If any chunk task fails, the scan is marked failed at once with that error. The worker also brings the database schema up to date when it starts, so a worker restarted on new code before the API never writes to a column that does not exist yet.
+
 ## Large repositories
 
-The whole repository is downloaded as one tarball (one API request) and every source file is scanned; vendored, minified, generated (`*.min.js`, `node_modules/`, `dist/` …) and >1 MB files are skipped. Only if the tarball download fails does the scanner fall back to fetching files one by one through the API, capped at 300 files (`MAX_API_FILES`), and then it refuses to start if the GitHub rate limit can't cover it. Presidio NER (the expensive step) runs once per file in a batch, only on lines where a kept result is possible, and only for the entity types used. Full `ohcnetwork/care` (1014 files): about 45 s.
+There is no file-count limit and no overall scan time limit; every source file in the repository is scanned, including bundled third-party code.
 
-The code scan stops starting new files after 7 minutes (`CODE_SCAN_BUDGET_S` in `tasks.py`) so it always finishes inside the worker's 10-minute limit; a partial result carries a warning such as "Partial scan: 900 of 1014 source files were scanned", shown on the dashboard. Scans still "queued"/"running" after 15 minutes are reported as failed.
+1. **Download once.** The scan is pinned to the default branch's current commit, which is downloaded as one tarball, streamed to disk with no size cap, into a volume shared by all worker processes (`PRIVACYPILOT_SNAPSHOT_DIR`). If the archive cannot be downloaded, files are listed from the git tree and fetched one by one; on a GitHub rate limit the task waits for the reset instead of failing.
+2. **Tag every file's origin.** `first_party` (the repository's own code), `third_party` (`node_modules/`, `vendor/`, `site-packages/`, `third_party/`, …) or `generated` (`dist/`, `build/`, `.next/`, `*.min.js`, `*.bundle.js`). Only `.d.ts` declarations, `.git/` and `__pycache__/` are left out, because they contain no executable code.
+3. **Scan identical bundled files once.** Dependencies repeat the same files many times (one copy per dependent in nested `node_modules`). Each distinct third-party/generated file (same content and extension) is scanned once and its findings are copied to every other copy, with that copy's path. First-party files are always scanned individually.
+4. **Split into chunks.** Files are split into chunks of at most 100 files / 1 MB (`CHUNK_MAX_FILES`, `CHUNK_MAX_BYTES`); a larger file gets a chunk of its own. Minified files with very long lines are analysed in 2,000-character windows, so a whole bundle on one line never exceeds spaCy's limit.
+5. **Scan in parallel.** Each chunk is its own Celery task, and the worker's processes scan chunks in parallel while the privacy policy is parsed.
+6. **Combine.** A final task merges all chunks, runs the rule engine and saves **every** finding.
+
+How third-party code counts in the rules:
+
+| Rule | Uses |
+|---|---|
+| Rule 2: third-party transmission, Section 8(2) / 8(5) | all findings; the evidence says when the call is inside bundled third-party or generated code |
+| Rule 1: notice gap, Section 5 / 6(1) | first-party findings only (a library that handles e-mail addresses internally does not mean the application collects them) |
+| Rule 3: purpose linkage, Section 6(1) | first-party files only (module types come from the application's own paths) |
+
+Time limits apply per chunk (`CHUNK_SOFT_LIMIT_S`, default 240 s), never to the whole scan. A file still running when its chunk hits the limit is retried alone; a file that exceeds the limit twice is named on the result as not scanned.
+
+### Making scans faster
+
+- **Worker processes.** The worker runs one process per CPU core by default (`WORKER_CONCURRENCY` overrides it: `WORKER_CONCURRENCY=2 docker compose up` on a small machine).
+- **Shared model memory.** The spaCy model is loaded once in the worker's parent process before the pool starts, and shared by all its processes, so adding processes costs much less memory than a full ~1 GB copy each. `PRELOAD_MODELS=0` turns this off. The policy parser reuses the same spaCy model instead of loading a second copy.
+- **No thread oversubscription.** Each process uses one math-library thread (`OMP_NUM_THREADS=1` etc.); parallelism comes from the processes.
+- **More containers.** `docker compose up --scale worker=3` adds worker containers; they share the snapshot volume. Workers on other machines also work: they fetch the files they need from GitHub.
+
+The frontend shows live progress ("1,840 of 5,210 source files scanned"). A scan is marked failed only if it stops making progress for 15 minutes while no other scan is progressing either, i.e. no worker is running.
+
+### All findings on the results page
+
+The results page lists every finding, 50 per page, from `GET /scans/{id}/findings?offset=&limit=&category=&origin=&sensitivity=&transmitted=true&q=`. You can filter by origin (your code / third-party / generated), PII category, "sent to a third party / logged", and search by file or code.
 
 ## Tests
 

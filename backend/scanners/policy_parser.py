@@ -478,13 +478,29 @@ _st_model = None
 _template_embeddings = None
 
 
+def _shared_presidio_nlp():
+    """Presidio's spaCy Language object, or None if Presidio is unavailable."""
+    try:
+        from scanners.presidio_scanner import get_analyzer
+        analyzer = get_analyzer()
+        return analyzer.nlp_engine.nlp["en"] if analyzer else None
+    except Exception:
+        return None
+
+
 def _get_nlp():
     global _nlp
     if _nlp is None:
         try:
-            import spacy
-            _nlp = spacy.load("en_core_web_lg")
-            print("[policy] spaCy en_core_web_lg loaded")
+            # Reuse the en_core_web_lg pipeline Presidio has already loaded
+            # (the code scanner loads it in every worker): a second
+            # spacy.load() of the same 600 MB model doubled each worker
+            # process's memory and start-up time for no benefit.
+            _nlp = _shared_presidio_nlp()
+            if _nlp is None:
+                import spacy
+                _nlp = spacy.load("en_core_web_lg")
+            print("[policy] spaCy en_core_web_lg ready")
         except Exception as e:
             print(
                 f"[policy] WARNING: spaCy en_core_web_lg unavailable ({e}) — "
@@ -503,7 +519,8 @@ def _get_st_model():
             import numpy as np
             _st_model = SentenceTransformer("all-MiniLM-L6-v2")
             templates = list(PURPOSE_TEMPLATES.values())
-            _template_embeddings = _st_model.encode(templates, normalize_embeddings=True)
+            _template_embeddings = _st_model.encode(templates, normalize_embeddings=True,
+                                                    show_progress_bar=False)
             print("[policy] sentence-transformer all-MiniLM-L6-v2 loaded")
         except Exception as e:
             print(
@@ -838,7 +855,8 @@ def _st_classify_purpose(
     """
     import numpy as np
     keys = list(PURPOSE_TEMPLATES.keys())
-    emb = st_model.encode([sentence], normalize_embeddings=True)[0]
+    emb = st_model.encode([sentence], normalize_embeddings=True,
+                          show_progress_bar=False)[0]
     scores = template_embeddings @ emb  # cosine since both normalized
     idx_sorted = scores.argsort()[::-1]
     best  = keys[idx_sorted[0]], float(scores[idx_sorted[0]])

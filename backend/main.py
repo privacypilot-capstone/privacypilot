@@ -3,18 +3,19 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")  # explicit path
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from scanners.code_scanner import scan_github_repo
 from scanners.policy_parser import parse_privacy_policy
 from dpdp.rule_engine import run_dpdp_rules
 from database import (create_tables, migrate_tables, get_db, scan_gap_categories,
+                       describe_database_url, database_instance_id,
                        Scan, Finding, Violation, ChatSession, ChatMessage)
 from scoring import calculate_compliance_score
 from report_generator import generate_report_html
@@ -25,7 +26,11 @@ app = FastAPI(title="PrivacyPilot API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    # Any port on this machine: Vite moves to 5174, 5175 … when 5173 is busy,
+    # and a fixed list made the browser block the API with a CORS error.
+    # Extra origins (a deployed frontend): CORS_ORIGINS=https://a,https://b
+    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -48,30 +53,113 @@ def _iso_utc(dt):
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
 
-# A scan still "queued"/"running" this long after creation can no longer
-# finish: the worker's hard limit is 10 minutes, so it was killed or no
-# worker is consuming the queue. Report it as failed instead of letting the
-# frontend poll forever.
+# A scan is declared dead only when NOTHING is moving, never because it is
+# big. Every finished chunk (and the repository download) records a
+# heartbeat in last_progress_at. A scan has stalled when neither it NOR any
+# other running scan has made progress for STALE_SCAN_AFTER — the second
+# condition matters because a scan queued behind another large scan makes no
+# progress of its own while the workers are busy, yet nothing is wrong.
 STALE_SCAN_AFTER = timedelta(minutes=15)
+# GitHub rate-limit resets are at most an hour away; a scan waiting for one
+# is not stalled.
+RATE_LIMIT_WAIT_MAX = timedelta(minutes=75)
 
 
 def _expire_if_stale(scan, db) -> None:
-    if (scan.status in ("queued", "running") and scan.created_at is not None
-            and datetime.utcnow() - scan.created_at > STALE_SCAN_AFTER):
-        scan.status = "failed"
-        scan.error_message = (
-            "The scan did not finish within 15 minutes: the worker hit its time "
-            "limit or no worker is running. Start the scan again; large "
-            "repositories are scanned up to the time limit and reported as partial."
-        )
-        db.commit()
+    if scan.status not in ("queued", "running"):
+        return
+    now = datetime.utcnow()
+    own = scan.last_progress_at or scan.created_at
+    if own is None:
+        return
+    limit = RATE_LIMIT_WAIT_MAX if (scan.phase or "").startswith("waiting") else STALE_SCAN_AFTER
+    if now - own <= limit:
+        return
+    from sqlalchemy import func
+    latest_any = (db.query(func.max(Scan.last_progress_at))
+                    .filter(Scan.status == "running").scalar())
+    if latest_any is not None and now - latest_any <= STALE_SCAN_AFTER:
+        return      # workers are busy with other scans; this one is queued behind them
+    scan.status = "failed"
+    scan.phase = "failed"
+    scan.error_message = (
+        f"The scan stopped making progress (no work for {int(limit.total_seconds() // 60)} "
+        "minutes): no worker is running or it crashed. Check that the worker "
+        "container is up, then start the scan again."
+    )
+    db.commit()
+
+
+def _check_task_failure(scan, db) -> None:
+    """
+    A worker that cannot write to this scan's row (wrong database, crash
+    before its first update) can still record its failure in Celery's result
+    backend. Read it from there so the scan shows the real error at once,
+    instead of "stopped making progress" 15 minutes later.
+    """
+    if scan.status not in ("queued", "running") or not getattr(scan, "task_id", None):
+        return
+    try:
+        from tasks import celery_app
+        res = celery_app.AsyncResult(scan.task_id)
+        state = res.state
+    except Exception:
+        return                       # Redis unreachable: the stall check still applies
+    if state != "FAILURE":
+        return
+    scan.status = "failed"
+    scan.phase = "failed"
+    scan.error_message = f"The scan worker failed: {res.result}"[:2000]
+    db.commit()
+
+
+def _load_findings(db, scan, limit: int | None = None) -> list:
+    """
+    A scan's stored findings, application code first (that is the order
+    complete_scan stores them in). Every finding is stored now, so pages
+    that only show a sample read `limit` rows instead of all of them. Scans
+    saved before gap_categories existed need all rows for the gap fallback
+    (they stored at most 200).
+    """
+    q = db.query(Finding).filter(Finding.scan_id == scan.id).order_by(Finding.id)
+    if limit is None or not scan.gap_categories:
+        return q.all()
+    return q.limit(limit).all()
+
+
+def _coverage_summary(scan) -> dict | None:
+    import json as _json
+    if not scan.coverage:
+        return None
+    c = _json.loads(scan.coverage)
+    return {
+        "total_source_files": c.get("total_source_files"),
+        "scanned":            c.get("scanned"),
+        "failed_files":       sorted((c.get("failed") or {}).keys()),
+        # Files scanned per origin, e.g. {"first_party": 812, "third_party": 4120, "generated": 37}
+        "origins":            c.get("origins", {}),
+        "duplicates_reused":  c.get("duplicates_reused", 0),
+        "findings_by_origin": c.get("findings_by_origin", {}),
+    }
+
+
+def _progress(scan) -> dict:
+    total = scan.files_total
+    done = min(scan.files_done or 0, total) if total is not None else None
+    return {
+        "phase":       scan.phase or scan.status,
+        "files_total": total,
+        "files_done":  done,
+        "percent":     (round(100 * done / total, 1) if total else None),
+    }
 
 
 @app.on_event("startup")
 def startup():
     create_tables()
     migrate_tables()
-    print("[db] Tables ready")
+    database_instance_id(create=True)
+    print(f"[db] Tables ready — {describe_database_url()}")
 
 
 class ScanRequest(BaseModel):
@@ -120,13 +208,122 @@ def _warn_missing_components():
         )
 
 
+# Worker database check (see tasks.worker_databases). Cached briefly so that
+# submitting several scans in a row does not wait for the reply each time.
+_WORKER_DB_CACHE: dict = {"at": None, "value": None}
+_WORKER_DB_TTL = timedelta(seconds=60)
+
+
+def _redis_reachable():
+    """True, or a short reason. A direct 2-second ping: much faster and
+    clearer than letting Celery retry a connection to a Redis that is down."""
+    try:
+        import redis
+        from tasks import REDIS_URL
+        redis.Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=2).ping()
+        return True
+    except Exception as e:
+        try:
+            from tasks import REDIS_URL
+            where = REDIS_URL.split("@")[-1]          # never show a password
+        except Exception:
+            where = "REDIS_URL"
+        return f"Redis at {where} is not reachable: {e}"
+
+
+def _worker_db_check(force: bool = False) -> dict:
+    """
+    Can the running workers complete a scan queued by this API?
+
+    {"api_database", "api_code_version", "workers": {host: {...}},
+     "ok": True | False | None, "problem": str | None}
+
+    ok is None when no worker answered (none running, or Redis unreachable):
+    the scan is queued and waits for one. ok is False when a worker
+      - runs older code than the API (it was not restarted after the code
+        changed: Celery never reloads code), or
+      - uses a different database. Databases are compared by the instance
+        id stored in them, not by URL, so localhost:15432 (API on the host)
+        and db:5432 (worker in Docker) are correctly the same Postgres.
+    """
+    from code_version import compute as code_version
+    now = datetime.utcnow()
+    cached = _WORKER_DB_CACHE
+    if not force and cached["at"] and now - cached["at"] < _WORKER_DB_TTL:
+        return cached["value"]
+    api_db, api_id = describe_database_url(), database_instance_id(create=True)
+    api_ver = code_version()
+    broker_ok = _redis_reachable()
+    try:
+        if broker_ok is not True:
+            raise ConnectionError(broker_ok)
+        from tasks import worker_databases
+        workers = worker_databases(timeout=1.0)
+    except Exception as e:
+        workers, err = {}, e
+    else:
+        err = None
+
+    report, outdated, other_db = {}, [], []
+    for host, w in workers.items():
+        if "database" not in w:
+            # Reply {"error": "KeyError('privacypilot_database')"}: the worker
+            # predates this check, i.e. it is running old code.
+            outdated.append(host)
+            report[host] = {"status": "running older code (restart it)",
+                            "detail": w.get("error")}
+            continue
+        entry = {"database": w.get("database"), "code_version": w.get("code_version")}
+        if w.get("code_version") != api_ver:
+            outdated.append(host)
+            entry["status"] = "running older code (restart it)"
+        elif not api_id or w.get("instance_id") != api_id:
+            other_db.append(host)
+            entry["status"] = ("different database" if w.get("instance_id")
+                               else "different database (never used by this API)")
+        else:
+            entry["status"] = "ok"
+        report[host] = entry
+
+    problems = []
+    if not api_id:
+        problems.append(f"The API cannot read its own database ({api_db}).")
+    if outdated:
+        problems.append(
+            "The scan worker is running older code than the API ("
+            + ", ".join(outdated) + "). A Celery worker does not reload code "
+            "after it changes; restart it: `docker compose restart worker`.")
+    if other_db:
+        problems.append(
+            f"The API uses {api_db} but worker(s) use a different database: "
+            + ", ".join(f"{report[h]['database']} ({h})" for h in other_db)
+            + ". Set the same DATABASE_URL for both (see README).")
+    if not workers:
+        value = {"api_database": api_db, "api_code_version": api_ver, "workers": {},
+                 "ok": None, "redis_reachable": broker_ok is True,
+                 "problem": (f"{broker_ok}. Start Redis or fix REDIS_URL." if broker_ok is not True
+                             else "No scan worker answered"
+                             + (f" ({err})" if err else "")
+                             + ". Scans will wait in the queue until a worker is started.")}
+    else:
+        value = {"api_database": api_db, "api_code_version": api_ver, "workers": report,
+                 "ok": not problems, "redis_reachable": True, "problem": " ".join(problems) or None}
+    cached["at"], cached["value"] = now, value
+    return value
+
+
 @app.get("/health")
 def health():
     components = _component_status()
+    db_check = _worker_db_check(force=True)
     return {
-        "status":     "ok" if all(components.values()) else "degraded",
+        "status":     ("ok" if all(components.values()) and db_check["ok"] else "degraded"),
         "message":    "PrivacyPilot is running",
         "components": components,
+        # e.g. {"api_database": "postgresql://localhost:15432/privacypilot",
+        #       "workers": {"celery@abc": "postgresql://db:5432/privacypilot"}, ...}
+        # No user names or passwords are included.
+        "database":   db_check,
     }
 
 
@@ -146,11 +343,30 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
     print(f"[scan] Enqueuing scan — repo: {req.github_repo_url}")
     print(f"[scan] Policy URL:      {req.privacy_policy_url}")
 
+    # ── Refuse a scan that cannot complete ────────────────────────────────
+    # If the workers that answered all use a different database from this
+    # API, the scan row created below is invisible to them and the scan could
+    # never finish (this is what produced "ForeignKeyViolation … scan_chunks"
+    # and a scan that sat "running" until the stall detector failed it).
+    db_check = _worker_db_check()
+    if db_check.get("redis_reachable") is False:
+        _WORKER_DB_CACHE["at"] = None
+        raise HTTPException(status_code=503,
+                            detail=f"Could not queue the scan: {db_check['problem']}")
+    # (No worker answering is not refused: one may be starting. The worker
+    # also re-checks that it can see the scan row before it starts.)
+    if db_check["ok"] is False:
+        _WORKER_DB_CACHE["at"] = None        # re-check on the next attempt
+        raise HTTPException(status_code=503, detail=db_check["problem"])
+
     # ── Pre-create scan record with status=queued ─────────────────────────
     scan = Scan(
         repo_url   = req.github_repo_url,
         policy_url = req.privacy_policy_url,
         status     = "queued",
+        phase      = "queued",
+        files_done = 0,
+        last_progress_at = datetime.utcnow(),
     )
     db.add(scan)
     db.commit()
@@ -170,12 +386,26 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
         )
     except ImportError as e:
         scan.status = "failed"
+        scan.phase = "failed"
+        scan.error_message = f"Import error: {e}"
         db.commit()
         raise HTTPException(
             status_code=503,
             detail=f"Import error: {e}",
         )
+    except Exception as e:
+        # Typically Redis is not reachable (wrong REDIS_URL, container down).
+        # Without this the scan row stayed "queued" until the stall detector.
+        from tasks import REDIS_URL
+        where = REDIS_URL.split("@")[-1]       # never show a Redis password
+        scan.status = "failed"
+        scan.phase = "failed"
+        scan.error_message = f"Could not queue the scan: Redis at {where} is not reachable ({e})."
+        db.commit()
+        raise HTTPException(status_code=503, detail=scan.error_message)
 
+    scan.task_id = task.id
+    db.commit()
     print(f"[scan] Task {task.id} enqueued for scan {scan_id}")
     return {
         "task_id": task.id,
@@ -193,6 +423,7 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
 def get_all_scans(db: Session = Depends(get_db)):
     scans = db.query(Scan).order_by(Scan.created_at.desc()).all()
     for s in scans:
+        _check_task_failure(s, db)
         _expire_if_stale(s, db)
     return [{
         "id":               s.id,
@@ -202,6 +433,7 @@ def get_all_scans(db: Session = Depends(get_db)):
         "violations_count": s.violations_count,
         "gaps_count":       s.gaps_count,
         "status":           s.status,
+        "progress":         _progress(s),
     } for s in scans]
 
 
@@ -210,12 +442,15 @@ def get_scan_status(scan_id: int, db: Session = Depends(get_db)):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    _check_task_failure(scan, db)
     _expire_if_stale(scan, db)
     return {
         "scan_id":  scan_id,
         "status":   scan.status,
         "repo_url": scan.repo_url,
         "error_message": scan.error_message,
+        # e.g. {"phase": "scanning", "files_total": 5210, "files_done": 1840, "percent": 35.3}
+        "progress": _progress(scan),
     }
 
 @app.get("/scan/status/{task_id}")
@@ -278,7 +513,7 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
         )
 
     violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
-    findings   = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+    findings   = _load_findings(db, scan, limit=30)
 
     class _FakeV:
         def __init__(self, s): self.severity = s
@@ -299,7 +534,9 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
         "gaps_count":       scan.gaps_count or 0,
         "gaps_detected": scan_gap_categories(scan, findings),
         # e.g. "Partial scan: 250 of 1014 source files were scanned (…)"
+        # e.g. "Scan coverage: 2 of 5210 source files could not be scanned (…)"
         "warning":       scan.error_message if scan.status == "complete" else None,
+        "coverage":      _coverage_summary(scan),
         "compliance": compliance,
         "violations": [
             {
@@ -319,10 +556,94 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
                 "line_number":  f.line_number,
                 "source":       f.source,
                 "raw_text":     f.raw_text,
+                "origin":       f.origin or "first_party",
             }
             for f in findings[:30]
         ],
     }
+
+@app.get("/scans/{scan_id}/findings")
+def get_scan_findings(
+    scan_id: int,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+    category: str | None = None,
+    origin: str | None = Query(None, pattern="^(first_party|third_party|generated)$"),
+    sensitivity: str | None = None,
+    transmitted: bool = False,
+    q: str | None = Query(None, max_length=200),
+    db: Session = Depends(get_db),
+):
+    """
+    Every finding of a completed scan, one page at a time.
+
+    A large repository can have tens of thousands of findings, so the
+    results page reads them in pages (offset/limit) and filters on the
+    server: category, origin (first_party / third_party / generated),
+    sensitivity, transmitted=true (only findings whose line sends data to a
+    third-party SDK / HTTP / queue / logger sink), and q (substring of the
+    file path or the matched code). `facets` counts the WHOLE scan (not the
+    current filter) by category and by origin, for the filter controls.
+    """
+    from sqlalchemy import func, or_
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    base = db.query(Finding).filter(Finding.scan_id == scan_id)
+    filt = base
+    if category:
+        filt = filt.filter(Finding.pii_category == category)
+    if origin:
+        # Scans stored before origins existed have NULL = their own code.
+        filt = filt.filter(Finding.origin == origin) if origin != "first_party" else \
+               filt.filter(or_(Finding.origin == "first_party", Finding.origin.is_(None)))
+    if sensitivity:
+        filt = filt.filter(Finding.sensitivity == sensitivity)
+    if transmitted:
+        filt = filt.filter(Finding.third_party_sdk.isnot(None))
+    if q:
+        like = f"%{q}%"
+        filt = filt.filter(or_(Finding.file_path.ilike(like), Finding.raw_text.ilike(like)))
+
+    total = filt.count()
+    rows = filt.order_by(Finding.id).offset(offset).limit(limit).all()
+
+    def _counts(col):
+        return {(k or "first_party"): n for k, n in
+                db.query(col, func.count(Finding.id))
+                  .filter(Finding.scan_id == scan_id).group_by(col).all()}
+
+    by_origin: dict = {}
+    for k, n in _counts(Finding.origin).items():
+        by_origin[k] = by_origin.get(k, 0) + n
+
+    return {
+        "scan_id": scan_id,
+        "total":   total,
+        "offset":  offset,
+        "limit":   limit,
+        "items": [{
+            "id":              f.id,
+            "pii_category":    f.pii_category,
+            "sensitivity":     f.sensitivity,
+            "file_path":       f.file_path,
+            "line_number":     f.line_number,
+            "source":          f.source,
+            "raw_text":        f.raw_text,
+            "field_name":      f.field_name,
+            "third_party_sdk": f.third_party_sdk,
+            "is_gap":          bool(f.is_gap),
+            "origin":          f.origin or "first_party",
+        } for f in rows],
+        "facets": {
+            "category":    _counts(Finding.pii_category),
+            "origin":      by_origin,
+            "sensitivity": _counts(Finding.sensitivity),
+            "transmitted": base.filter(Finding.third_party_sdk.isnot(None)).count(),
+        },
+    }
+
 
 @app.get("/report/{scan_id}")
 def get_report(
@@ -342,7 +663,7 @@ def get_report(
         raise HTTPException(status_code=404, detail="Scan not found")
 
     violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
-    findings   = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+    findings   = _load_findings(db, scan, limit=10)
 
     class FakeV:
         def __init__(self, s):
@@ -435,7 +756,7 @@ def get_scan_summary(scan_id: int, db: Session = Depends(get_db)):
 
     # Build a minimal scan_data dict from DB rows
     violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
-    findings   = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+    findings   = _load_findings(db, scan, limit=10)
 
     from scoring import calculate_compliance_score
     class _FakeV:
@@ -540,7 +861,7 @@ def send_chat_message(
     # Reconstruct scan_data context from DB
     scan = session.scan if hasattr(session, "scan") else            db.query(Scan).filter(Scan.id == session.scan_id).first()
     violations = db.query(Violation).filter(Violation.scan_id == scan.id).all()
-    findings   = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+    findings   = _load_findings(db, scan, limit=10)
 
     from scoring import calculate_compliance_score
     class _FakeV:

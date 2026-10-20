@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import ScoreRing from './ScoreRing';
 import ChatPanel from './ChatPanel';
 
@@ -103,6 +103,165 @@ function AISummary({ text }) {
   );
 }
 
+const ORIGIN_LABEL = {
+  first_party: 'Your code',
+  third_party: 'Third-party',
+  generated:   'Generated / built',
+};
+const PAGE_SIZE = 50;
+
+function sensitivityColor(s) {
+  return s === 'high' ? '#ef4444' : s === 'medium' ? '#f97316' : '#22c55e';
+}
+
+// Every finding of the scan, read from GET /scans/{id}/findings one page at a
+// time (a large repository can have tens of thousands), with server-side
+// filters by category, origin, "sent to a third party" and a text search.
+function AllFindings({ scanId, fallback }) {
+  const [filters, setFilters] = useState({ category: '', origin: '', transmitted: false });
+  const [search, setSearch]   = useState('');
+  const [q, setQ]             = useState('');
+  const [offset, setOffset]   = useState(0);
+  const [data, setData]       = useState(null);
+  const [error, setError]     = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  // Debounce the search box so typing does not send a request per key.
+  useEffect(() => {
+    const t = setTimeout(() => { setQ(search.trim()); setOffset(0); }, 350);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    if (!scanId) return;
+    const params = new URLSearchParams({ offset: String(offset), limit: String(PAGE_SIZE) });
+    if (filters.category)    params.set('category', filters.category);
+    if (filters.origin)      params.set('origin', filters.origin);
+    if (filters.transmitted) params.set('transmitted', 'true');
+    if (q)                   params.set('q', q);
+    let cancelled = false;
+    setLoading(true);
+    fetch(`${API}/scans/${scanId}/findings?${params}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (!cancelled) { setData(d); setError(null); } })
+      .catch(e => { if (!cancelled) setError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [scanId, offset, filters, q]);
+
+  const update = (patch) => { setFilters(f => ({ ...f, ...patch })); setOffset(0); };
+
+  // Older backend without the endpoint: show the sample it returned.
+  const items = data?.items ?? (error ? (fallback || []) : []);
+  const total = data?.total ?? items.length;
+  const facets = data?.facets;
+  const from = total === 0 ? 0 : offset + 1;
+  const to = Math.min(offset + PAGE_SIZE, total);
+
+  return (
+    <div className="card mb-24">
+      <div className="card-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+        <div>
+          <div className="card-header-title">All PII Findings</div>
+          <div className="card-header-subtitle">
+            Every finding in the repository — your code, bundled third-party code and build output
+          </div>
+        </div>
+        <span className="section-count" style={{ marginLeft: 'auto' }}>
+          {facets ? Object.values(facets.origin).reduce((a, b) => a + b, 0) : total} total
+        </span>
+      </div>
+
+      {facets && (
+        <div className="card-body" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', paddingBottom: 0 }}>
+          <div className="filter-tabs" style={{ marginLeft: 0 }}>
+            {['', 'first_party', 'third_party', 'generated'].map(o => (
+              (o === '' || facets.origin[o]) ? (
+                <button key={o || 'all'}
+                        className={`filter-tab ${filters.origin === o ? 'active' : ''}`}
+                        onClick={() => update({ origin: o })}>
+                  {o === '' ? 'All origins' : `${ORIGIN_LABEL[o]} (${facets.origin[o]})`}
+                </button>
+              ) : null
+            ))}
+          </div>
+          <select value={filters.category} onChange={e => update({ category: e.target.value })}
+                  aria-label="PII category" style={{ fontSize: 12.5, padding: '4px 8px' }}>
+            <option value="">All categories</option>
+            {Object.entries(facets.category).sort((a, b) => b[1] - a[1]).map(([c, n]) => (
+              <option key={c} value={c}>{c} ({n})</option>
+            ))}
+          </select>
+          <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={filters.transmitted}
+                   onChange={e => update({ transmitted: e.target.checked })} />
+            Sent to a third party / logged ({facets.transmitted})
+          </label>
+          <input type="search" placeholder="Search file or code…" value={search}
+                 onChange={e => setSearch(e.target.value)}
+                 style={{ fontSize: 12.5, padding: '4px 8px', minWidth: 180, flex: '1 1 180px' }} />
+        </div>
+      )}
+
+      {error && !data && (
+        <div className="card-body" style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+          Could not load the full list ({error}); showing a sample.
+        </div>
+      )}
+
+      <div style={{ overflowX: 'auto', opacity: loading ? 0.6 : 1 }}>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>PII Type</th>
+              <th>Sensitivity</th>
+              <th>File Path</th>
+              <th>Line</th>
+              <th>Origin</th>
+              <th>Sent to</th>
+              <th>Code</th>
+              <th>Detected By</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(f => (
+              <tr key={f.id ?? `${f.file_path}:${f.line_number}:${f.pii_category}`}>
+                <td><span className="pii-chip">{f.pii_category}</span></td>
+                <td><span style={{ fontSize: 12, fontWeight: 600, color: sensitivityColor(f.sensitivity) }}>{f.sensitivity || '—'}</span></td>
+                <td className="mono" title={f.file_path}
+                    style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {f.file_path || '—'}
+                </td>
+                <td className="mono">{f.line_number || '—'}</td>
+                <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{ORIGIN_LABEL[f.origin] || ORIGIN_LABEL.first_party}</td>
+                <td className="mono" style={{ fontSize: 12 }}>{f.third_party_sdk || '—'}</td>
+                <td className="mono" title={f.raw_text}
+                    style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>
+                  {f.raw_text}
+                </td>
+                <td><span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{f.source}</span></td>
+              </tr>
+            ))}
+            {items.length === 0 && !loading && (
+              <tr><td colSpan={8} style={{ textAlign: 'center', padding: 24 }}>No findings match these filters.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {data && total > PAGE_SIZE && (
+        <div className="card-body" style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end', fontSize: 12.5 }}>
+          <span>{from}–{to} of {total}</span>
+          <button className="btn btn-secondary btn-sm" disabled={offset === 0 || loading}
+                  onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>‹ Prev</button>
+          <button className="btn btn-secondary btn-sm" disabled={to >= total || loading}
+                  onClick={() => setOffset(offset + PAGE_SIZE)}>Next ›</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ResultsDashboard({ scanId, result, violations, findings, compliance, aiSummary, aiLoading, aiError }) {
   const [sevFilter, setSevFilter] = useState('all');
 
@@ -129,11 +288,25 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
 
   return (
     <div className="animate-in">
-      {/* ── Partial-coverage warning (large repos: file cap / time limit) ── */}
+      {/* ── Coverage warning (files that could not be scanned) ── */}
       {result?.warning && (
         <div className="card card-pad mb-24" role="status"
              style={{ background: '#fffbeb', border: '1px solid #f59e0b', color: '#92400e', fontSize: 13.5 }}>
           ⚠️ {result.warning}
+        </div>
+      )}
+      {/* ── What was scanned ── */}
+      {result?.coverage?.origins && Object.keys(result.coverage.origins).length > 0 && (
+        <div className="card card-pad mb-24" style={{ fontSize: 13 }}>
+          Scanned {result.coverage.scanned ?? '—'} of {result.coverage.total_source_files ?? '—'} source files:{' '}
+          {result.coverage.origins.first_party ?? 0} in your code,{' '}
+          {result.coverage.origins.third_party ?? 0} bundled third-party,{' '}
+          {result.coverage.origins.generated ?? 0} generated / built.
+          {result.coverage.duplicates_reused > 0 && (
+            <> {result.coverage.duplicates_reused} identical bundled copies were scanned once and their results reused.</>
+          )}
+          {' '}Third-party and generated code counts towards third-party transmission (Section 8) only;
+          notice gaps and purpose checks use your own code.
         </div>
       )}
       {/* ── Metric strip ── */}
@@ -274,48 +447,9 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
         </div>
       )}
 
-      {/* ── Sample Findings table ── */}
-      {findings && findings.length > 0 && (
-        <div className="card mb-24">
-          <div className="card-header">
-            <div>
-              <div className="card-header-title">PII Findings in Code</div>
-              <div className="card-header-subtitle">Detected across repository files</div>
-            </div>
-            <span className="section-count" style={{ marginLeft: 'auto' }}>{findings.length} shown</span>
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>PII Type</th>
-                  <th>Sensitivity</th>
-                  <th>File Path</th>
-                  <th>Line</th>
-                  <th>Detected By</th>
-                </tr>
-              </thead>
-              <tbody>
-                {findings.map((f, i) => (
-                  <tr key={i}>
-                    <td><span className="pii-chip">{f.pii_category}</span></td>
-                    <td>
-                      <span style={{
-                        fontSize: 12, fontWeight: 600,
-                        color: f.sensitivity === 'high' ? '#ef4444' : f.sensitivity === 'medium' ? '#f97316' : '#22c55e',
-                      }}>{f.sensitivity}</span>
-                    </td>
-                    <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {f.file_path || '—'}
-                    </td>
-                    <td className="mono">{f.line_number || '—'}</td>
-                    <td><span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{f.source}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      {/* ── Every finding (paged from the backend) ── */}
+      {(scanId || (findings && findings.length > 0)) && (
+        <AllFindings scanId={scanId} fallback={findings} />
       )}
 
       {/* AI Chat Widget */}

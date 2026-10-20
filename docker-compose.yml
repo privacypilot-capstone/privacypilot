@@ -45,11 +45,28 @@ services:
     build: ./backend
     command: >
       sh -c "pip install -r requirements.txt --break-system-packages -q &&
-             celery -A tasks worker --loglevel=info --concurrency=4"
+             celery -A tasks worker --loglevel=info --concurrency=$${WORKER_CONCURRENCY:-$$(nproc)}"
+    # --concurrency = worker processes = chunks scanned in parallel. Default:
+    # one per CPU core (the scan is CPU-bound). The spaCy model is loaded once
+    # in the parent and shared by all processes (tasks._preload_models), so
+    # each process needs far less than its own ~1 GB copy. Override on a small
+    # machine:  WORKER_CONCURRENCY=2 docker compose up
+    # More machines / containers:  docker compose up --scale worker=3
     environment:
       - DATABASE_URL=postgresql://pilot:pilot@db:5432/privacypilot
       - REDIS_URL=redis://redis:6379/0
       - PYTHONPATH=/app
+      # Repository snapshots: downloaded once per commit, read by every
+      # chunk task. Must be shared by all worker processes (one volume).
+      - PRIVACYPILOT_SNAPSHOT_DIR=/data/snapshots
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-}
+      # Parallelism comes from the worker processes; one math-library thread
+      # per process stops N processes × N BLAS/torch threads from fighting
+      # over the same N cores.
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - TOKENIZERS_PARALLELISM=false
     depends_on:
       db:
         condition: service_healthy
@@ -57,3 +74,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - snapshots:/data/snapshots
+
+volumes:
+  snapshots:

@@ -33,3 +33,6 @@ class DataFlowObject(BaseModel):
     is_gap:                  Optional[bool]      = None
     dpdp_sections_violated:  Optional[List[str]] = None
     severity:                Optional[str]       = None
+    # first_party | third_party | generated — where the file came from
+    # (repo_snapshot.classify_path). None for policy claims.
+    origin:                  Optional[str]       = None
