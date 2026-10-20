@@ -66,12 +66,20 @@ function ViolationCard({ v }) {
   );
 }
 
+// Render **bold** spans as <strong> with React elements, never as raw HTML:
+// the LLM output can echo text from the scanned privacy policy, so it is
+// untrusted (it was previously injected with dangerouslySetInnerHTML).
+function renderBold(paragraph) {
+  return paragraph.split(/\*\*(.+?)\*\*/g).map((part, i) =>
+    i % 2 === 1 ? <strong key={i}>{part}</strong> : part
+  );
+}
+
 // Format raw markdown from LLM into readable paragraphs
 function AISummary({ text }) {
   if (!text) return null;
   const clean = text
     .replace(/#{1,3} /g, '')
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .split(/\n\n+/)
     .filter(p => p.trim());
 
@@ -88,7 +96,7 @@ function AISummary({ text }) {
       </div>
       <div className="ai-card-body">
         {clean.map((p, i) => (
-          <p key={i} dangerouslySetInnerHTML={{ __html: p }} />
+          <p key={i}>{renderBold(p)}</p>
         ))}
       </div>
     </div>

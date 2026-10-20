@@ -46,6 +46,7 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
     # ── Deferred heavy imports ────────────────────────────────────────────────
     # Imported here (not at module top) so the worker process can import this
     # module at startup without triggering the full scanner import chain.
+    import json
     from database import SessionLocal, Scan, Finding, Violation
     from scanners.code_scanner import scan_github_repo
     from scanners.policy_parser import parse_privacy_policy
@@ -102,6 +103,7 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
         scan.findings_count   = len(code_findings)
         scan.policy_count     = len(policy_claims)
         scan.gaps_count       = len(gap_categories)
+        scan.gap_categories   = json.dumps(sorted(c.value for c in gap_categories))
         scan.violations_count = len(violations)
         scan.status           = "complete"
 

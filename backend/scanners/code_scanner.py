@@ -8,8 +8,15 @@ Two-pass PII detection over GitHub source files, extended with:
              line may yield several categories (longest match wins overlaps)
   Pass 2  — Microsoft Presidio NER + India regex (for lines missed by regex);
              Aadhaar values must pass Verhoeff, PAN values the PAN structure
-  Taint   — AST taint analysis: propagate PII labels through variable
-             assignments to third-party sink call sites
+  Sinks   — a line's sink is the sink CALL that encloses it (Python `ast`,
+             JS/TS tree-sitter), so PII on continuation lines of a
+             multi-line call is attributed; SDK clients held in variables or
+             imported under other names (`mp = mixpanel.Mixpanel()`,
+             `from twilio.rest import Client`) are resolved as aliases;
+             government verification endpoints (*.gov.in) are not sinks
+  Taint   — AST taint analysis: propagate sets of PII labels through
+             assignments (tainted names, PII field reads `p.blood_group`,
+             PII keys `d['email']`) to sink call sites
              (Python via `ast`; JS/TS via tree-sitter-javascript)
   Classify— Module classifier: file path tokens + AST function names
              → usage_map {PIICategory → set[module_type]}
@@ -28,8 +35,8 @@ import concurrent.futures
 import re
 from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
-from scanners.presidio_scanner import scan_text_with_presidio, verhoeff_checksum_valid
-from scanners.sinks import canonical_sink
+from scanners.presidio_scanner import scan_text_with_presidio_spans, verhoeff_checksum_valid
+from scanners.sinks import canonical_sink, sink_kind
 
 # Bare schema / field-declaration lines (Django ORM `field = models.XField(...)`,
 # SQLAlchemy `col = Column(...)`, dataclass/pydantic `field: Type = Field(...)`,
@@ -109,6 +116,102 @@ def _pass1_categories(norm_line: str) -> list[PIICategory]:
         if cat not in cats:
             cats.append(cat)
     return cats
+
+
+# ── Comment handling ──────────────────────────────────────────────────────────
+
+def _strip_inline_comment(line: str, lang: str) -> str:
+    """
+    Return the code part of `line`, cutting at a Python `#` or a JS/TS `//`
+    only when it sits OUTSIDE a string literal.
+
+    The old `line.split('#')[0]` / `line.split('//')[0]` also cut inside
+    strings, so `"https://…"` or `"#"` threw away the rest of the line —
+    including any sink call after it (`… "https://x/address"; console.log(u)`
+    lost the console.log). Quote state is tracked per line ('  "  and, for
+    JS, the template-literal backtick), with backslash escapes honoured.
+    """
+    quotes = ('"', "'", '`') if lang == 'js' else ('"', "'")
+    in_q = None
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if in_q:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == in_q:
+                in_q = None
+        elif ch in quotes:
+            in_q = ch
+        elif lang == 'py' and ch == '#':
+            return line[:i]
+        elif lang == 'js' and ch == '/' and i + 1 < n and line[i + 1] == '/':
+            return line[:i]
+        i += 1
+    return line
+
+
+def _string_spans(line: str, lang: str) -> list[tuple[int, int]]:
+    """(start, end) character ranges of string-literal CONTENTS on a line
+    (same quote rules as _strip_inline_comment)."""
+    quotes = ('"', "'", '`') if lang == 'js' else ('"', "'")
+    spans: list[tuple[int, int]] = []
+    in_q, start = None, 0
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if in_q:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == in_q:
+                spans.append((start, i))
+                in_q = None
+        elif ch in quotes:
+            in_q, start = ch, i + 1
+        elif (lang == 'py' and ch == '#') or (lang == 'js' and line.startswith('//', i)):
+            break
+        i += 1
+    return spans
+
+
+# Presidio's spaCy NER reads code as prose: it has tagged a Twilio account
+# SID ("ACxxxx…"), a class name ("Student") and "response.json" as PERSON.
+# On a line of code, a PERSON / LOCATION hit is only kept when it sits
+# inside a string literal and looks like a proper name.
+_NAME_LIKE_RE = re.compile(r"^[A-Z][a-z]+(?:[ .'\-]+[A-Z][a-z]+)*$")
+
+
+def _plausible_ner_span(line: str, start: int, end: int, lang: str) -> bool:
+    if not _NAME_LIKE_RE.match(line[start:end].strip()):
+        return False
+    return any(s <= start and end <= e for s, e in _string_spans(line, lang))
+
+
+def _python_docstring_lines(source_text: str) -> set[int]:
+    """
+    Line numbers covered by bare string-expression statements (docstrings
+    and standalone string "comments"), found with `ast`.
+
+    Replaces the old text heuristic that toggled a "docstring" flag on every
+    line starting with triple quotes. That heuristic (a) missed prefixed
+    docstrings such as r\"\"\" … \"\"\", and (b) inverted after an assigned
+    multi-line string (QUERY = \"\"\" … \"\"\"): the closing quotes were
+    taken as an opening, so all code below was silently skipped. Assigned
+    strings (SQL, templates) are data and ARE scanned. Files that do not
+    parse get no docstring skipping.
+    """
+    try:
+        tree = ast.parse(source_text)
+    except (SyntaxError, ValueError):
+        return set()
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            skip.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return skip
 
 
 # Aadhaar value pattern (12-digit, possibly spaced)
@@ -311,15 +414,244 @@ def classify_module(file_path: str, source_text: str) -> set[str]:
 _IDENT_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
 
 
-def _seed_taint(lines: list[str], line_findings: list[tuple[int, PIICategory]]) -> dict[str, PIICategory]:
-    """Identifiers on PII-positive lines become the initial tainted names."""
-    tainted: dict[str, PIICategory] = {}
+# Variable assigned on a line: `x = …`, `x: T = …`, `const/let/var x = …`
+# (not `==`, `<=`, `>=`, `!=`, keyword arguments are irrelevant here because
+# the pattern is anchored at the start of the statement).
+_ASSIGN_LHS_RE = re.compile(
+    r'^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=(?!=)'
+)
+
+
+def _own_pii(name: str) -> set[PIICategory]:
+    """PII categories an identifier / field / key name itself denotes
+    (`email`, `phoneNumber`, `latest_diagnosis` …)."""
+    return set(_pass1_categories(_normalise_identifiers(name)))
+
+
+def _seed_taint(
+    lines: list[str],
+    line_findings: list[tuple[int, PIICategory]],
+    lang: str = 'py',
+) -> dict[str, set[PIICategory]]:
+    """
+    Initial tainted names, taken from PII-positive lines. Each name maps to
+    the SET of PII categories it may carry.
+
+    Only two kinds of identifier are seeded:
+      1. identifiers whose own name is a PII word (`email`, `phoneNumber`,
+         `blood_group` …), with that word's categories;
+      2. the variable ASSIGNED on the line (`contact = request.form["email"]`
+         seeds `contact`), with all of the line's categories.
+
+    Receiver objects such as `request`, `form` or `self` are not seeded
+    (seeding every identifier made `print(request.method)` an "email" leak).
+    Field reads like `patient.blood_group` are handled where they are USED
+    (see _py_expr_cats), so `payload = {"bg": patient.blood_group}` still
+    taints `payload`.
+    """
+    tainted: dict[str, set[PIICategory]] = {}
+    line_cats: dict[int, set[PIICategory]] = {}
     for line_num, cat in line_findings:
-        if line_num - 1 < len(lines):
-            for ident in _IDENT_RE.findall(lines[line_num - 1]):
-                if len(ident) > 2:
-                    tainted.setdefault(ident.lower(), cat)
+        line_cats.setdefault(line_num, set()).add(cat)
+    for line_num, cats in line_cats.items():
+        if not (0 < line_num <= len(lines)):
+            continue
+        code = _strip_inline_comment(lines[line_num - 1], lang)
+        for ident in _IDENT_RE.findall(code):
+            own = _own_pii(ident)
+            if own:
+                tainted.setdefault(ident.lower(), set()).update(own)
+        m = _ASSIGN_LHS_RE.match(code)
+        if m:
+            tainted.setdefault(m.group(1).lower(), set()).update(cats)
     return tainted
+
+
+# ── SDK aliases and sink calls ────────────────────────────────────────────────
+# A sink used to be recognised only when the SDK's name appeared in the
+# calling line's text. Real code keeps SDK clients in variables or imports
+# them under other names:
+#     mp = mixpanel.Mixpanel(TOKEN);              mp.track(email, …)
+#     from twilio.rest import Client;  client = Client(…);  client.messages.create(…)
+#     import segment.analytics as analytics;      analytics.track(…)
+#     from firebase_admin import analytics;       analytics.log_event(…)
+# Imported names are mapped to the SDK of their module, assigned variables
+# inherit the SDK of the expression they are built from, and a call whose
+# root name is such a variable is a call to that SDK.
+
+def _package_sink(name: str) -> str | None:
+    """Sink label for an imported package, decided by its TOP-LEVEL name
+    only: 'twilio.rest' → twilio, 'segment.analytics' → segment,
+    'firebase_admin' → firebase, 'mixpanel-browser' → mixpanel,
+    '@segment/analytics-node' → segment, 'firebase/analytics' → firebase.
+    A project's own module such as 'services.analytics' or './analytics'
+    is not an SDK (its top-level name is 'services' / relative)."""
+    if not name or name.startswith(('.', '/')):
+        return None
+    if name.startswith('@'):
+        top = name.split('/')[0][1:]          # npm scope: @segment/… → segment
+    else:
+        top = re.split(r'[./]', name)[0]
+    top = top.replace('-', '.')
+    return canonical_sink(top + '(') or canonical_sink(top + '.')
+
+
+def _py_root_name(node) -> str | None:
+    """Leftmost name of an expression: client.messages.create → client."""
+    while True:
+        if isinstance(node, ast.Call):
+            node = node.func
+        elif isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        elif isinstance(node, ast.Name):
+            return node.id
+        else:
+            return None
+
+
+def _python_sdk_aliases(tree) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                label = _package_sink(a.name)
+                if label:
+                    aliases[a.asname or a.name.split('.')[0]] = label
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            label = _package_sink(node.module)
+            if label:
+                for a in node.names:
+                    aliases[a.asname or a.name] = label
+    for _ in range(5):                       # propagate through assignments
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            root = _py_root_name(node.value)
+            if not root:
+                continue
+            label = aliases.get(root)
+            if label is None:
+                guess = _package_sink(root)
+                label = guess if guess and sink_kind(guess) == 'sdk' else None
+            if not label:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name) and t.id not in aliases:
+                    aliases[t.id] = label
+                    changed = True
+        if not changed:
+            break
+    return aliases
+
+
+# Government verification endpoints (e.g. UIDAI Aadhaar authentication) are
+# not Data Processors engaged by the fiduciary, so a call to them is not a
+# Section 8(2) transmission. Only literal URLs (or module-level string
+# constants) on these hosts are exempted.
+_GOV_HOST_RE = re.compile(r'(?:^|\.)(?:gov\.in|nic\.in)$', re.I)
+
+
+def _module_str_constants(tree) -> dict[str, str]:
+    consts: dict[str, str] = {}
+    for node in getattr(tree, 'body', []):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    consts[t.id] = node.value.value
+    return consts
+
+
+def _py_url_of(call, constants: dict[str, str]) -> str | None:
+    arg = call.args[0] if call.args else next(
+        (k.value for k in call.keywords if k.arg == 'url'), None)
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.Name):
+        return constants.get(arg.id)
+    if isinstance(arg, ast.JoinedStr) and arg.values:
+        first = arg.values[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+        if isinstance(first, ast.FormattedValue) and isinstance(first.value, ast.Name):
+            return constants.get(first.value.id)
+    return None
+
+
+def _is_gov_url(url: str | None) -> bool:
+    if not url:
+        return False
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ''
+    return bool(_GOV_HOST_RE.search(host))
+
+
+def _python_call_label(call, aliases: dict[str, str], constants: dict[str, str]) -> str | None:
+    try:
+        callee = ast.unparse(call.func)
+    except Exception:
+        return None
+    root = _py_root_name(call.func)
+    label = aliases[root] if root in aliases else canonical_sink(callee + '(')
+    if label and sink_kind(label) == 'http' and _is_gov_url(_py_url_of(call, constants)):
+        return None
+    return label
+
+
+_KIND_RANK = {'sdk': 0, 'http': 1, 'queue': 2, 'logger': 3}
+
+
+def _rank(label: str) -> int:
+    return _KIND_RANK.get(sink_kind(label), 9)
+
+
+def _python_call_sinks(source_text: str) -> dict[int, str] | None:
+    """
+    {line_number → sink label} for every line inside a sink call, found with
+    ast. A multi-line call such as
+        analytics.track(c.email, 'loan', {
+            'pan_number': c.pan_number,        ← this line is inside the call
+        })
+    gives the sink to all of its lines; previously only the first line could
+    match, so PII on continuation lines never reached Rule 2. Lines that only
+    MENTION an SDK (constants, `mixpanel_key = …`) are no longer sinks.
+    Returns None when the file does not parse (caller falls back to text).
+    """
+    try:
+        tree = ast.parse(source_text)
+    except (SyntaxError, ValueError):
+        return None
+    aliases = _python_sdk_aliases(tree)
+    constants = _module_str_constants(tree)
+    by_line: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        label = _python_call_label(node, aliases, constants)
+        if not label:
+            continue
+        for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+            if ln not in by_line or _rank(label) < _rank(by_line[ln]):
+                by_line[ln] = label
+    return by_line
+
+
+def _py_expr_cats(node, tainted: dict[str, set[PIICategory]]) -> set[PIICategory]:
+    """PII categories an expression may carry: tainted variable names, PII
+    field reads (`patient.blood_group`) and PII keys (`data['email']`)."""
+    out: set[PIICategory] = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out |= tainted.get(n.id.lower(), set())
+        elif isinstance(n, ast.Attribute):
+            out |= _own_pii(n.attr)
+        elif isinstance(n, ast.Subscript):
+            s = n.slice
+            if isinstance(s, ast.Constant) and isinstance(s.value, str):
+                out |= _own_pii(s.value)
+    return out
 
 
 def _python_taint_analysis(
@@ -329,12 +661,15 @@ def _python_taint_analysis(
 ) -> list[dict]:
     """
     Python AST taint analysis.
-    Walks assignments: if the RHS references a name that appears in a PII-positive
-    line (from pass 1/2), the LHS variable is tainted.
-    Walks calls: if a tainted variable appears as an argument to a sink function,
-    report a taint finding. The sink is recognised from the full callee text
-    (ast.unparse), so print(x), self.logger.warning(x) and task.delay(x) are
-    all seen.
+
+    Propagation: a variable assigned from an expression carrying PII (a
+    tainted name, a PII field read or a PII key) becomes tainted with ALL of
+    those categories, iterated to a fixed point. A variable used to carry
+    only the first category found (chosen at random among several), so
+    `payload = {"email": email, "phone": phone}` reported only one of them.
+
+    Sinks: a call whose callee is a sink (by name, or through an SDK alias)
+    and whose arguments carry PII yields one finding per category.
 
     Returns list of {file_path, line_number, pii_category, sink, raw_text}.
     """
@@ -343,65 +678,147 @@ def _python_taint_analysis(
         return taint_findings
 
     lines = source_text.splitlines()
-    tainted_names = _seed_taint(lines, line_findings)
+    tainted = _seed_taint(lines, line_findings, 'py')
 
     try:
         tree = ast.parse(source_text)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return taint_findings
 
-    # Walk assignments to propagate taint
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            value = node.value if isinstance(node, ast.Assign) else getattr(node, 'value', None)
-            if value is None:
-                continue
-            rhs_names = {
-                n.id.lower()
-                for n in ast.walk(value)
-                if isinstance(n, ast.Name)
-            }
-            propagate_cat = next(
-                (tainted_names[n] for n in rhs_names if n in tainted_names),
-                None,
-            )
-            if propagate_cat:
+    for _ in range(5):
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                value = getattr(node, 'value', None)
+                if value is None:
+                    continue
+                cats = _py_expr_cats(value, tainted)
+                if not cats:
+                    continue
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for tgt in targets:
                     if isinstance(tgt, ast.Name):
-                        tainted_names[tgt.id.lower()] = propagate_cat
+                        cur = tainted.setdefault(tgt.id.lower(), set())
+                        if not cats <= cur:
+                            cur |= cats
+                            changed = True
+        if not changed:
+            break
 
-    # Walk calls to detect tainted args at sink sites
+    aliases = _python_sdk_aliases(tree)
+    constants = _module_str_constants(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        try:
-            callee = ast.unparse(node.func)
-        except Exception:
-            continue
-        sink = canonical_sink(callee + '(')
+        sink = _python_call_label(node, aliases, constants)
         if not sink:
             continue
-
-        call_line = getattr(node, 'lineno', 0)
+        cats: set[PIICategory] = set()
         for arg in list(node.args) + [kw.value for kw in node.keywords]:
-            arg_names = {
-                n.id.lower()
-                for n in ast.walk(arg)
-                if isinstance(n, ast.Name)
-            }
-            hit = next((a for a in arg_names if a in tainted_names), None)
-            if hit:
-                taint_findings.append({
-                    "file_path":    file_path,
-                    "line_number":  call_line,
-                    "pii_category": tainted_names[hit],
-                    "sink":         sink,
-                    "raw_text":     (lines[call_line - 1] if call_line - 1 < len(lines) else "").strip()[:200],
-                })
-                break  # one report per call site
+            cats |= _py_expr_cats(arg, tainted)
+        call_line = getattr(node, 'lineno', 0)
+        raw = (lines[call_line - 1] if 0 < call_line <= len(lines) else "").strip()[:200]
+        for cat in sorted(cats, key=lambda c: c.value):
+            taint_findings.append({
+                "file_path":    file_path,
+                "line_number":  call_line,
+                "pii_category": cat,
+                "sink":         sink,
+                "raw_text":     raw,
+            })
 
     return taint_findings
+
+
+# ── JavaScript / TypeScript ───────────────────────────────────────────────────
+
+_JS_IMPORT_RE = re.compile(r'''import\s+(.+?)\s+from\s+['"]([^'"]+)['"]''')
+_JS_REQUIRE_RE = re.compile(
+    r'''(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)''')
+_JS_ASSIGN_RE = re.compile(
+    r'''(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:new\s+|await\s+)?([A-Za-z_$][\w$]*)''')
+_JS_NAME_RE = re.compile(r'[A-Za-z_$][\w$]*')
+
+
+def _js_bound_names(clause: str) -> list[str]:
+    """Names bound by an import clause / destructuring: `mp`, `* as mp`,
+    `{ A, B as C }` → [mp] / [mp] / [A, C]."""
+    toks = _JS_NAME_RE.findall(clause)
+    out = []
+    for i, t in enumerate(toks):
+        if t == 'as' or (i + 1 < len(toks) and toks[i + 1] == 'as'):
+            continue
+        out.append(t)
+    return out
+
+
+def _js_sdk_aliases(source_text: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for rx in (_JS_IMPORT_RE, _JS_REQUIRE_RE):
+        for m in rx.finditer(source_text):
+            label = _package_sink(m.group(2))
+            if label:
+                for name in _js_bound_names(m.group(1)):
+                    aliases[name] = label
+    for _ in range(5):
+        changed = False
+        for m in _JS_ASSIGN_RE.finditer(source_text):
+            target, root = m.group(1), m.group(2)
+            if root in aliases and target not in aliases:
+                aliases[target] = aliases[root]
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
+def _js_parse(source_text: str):
+    try:
+        from tree_sitter import Language, Parser
+        import tree_sitter_javascript as tsjs
+    except ImportError:
+        return None
+    try:
+        parser = Parser(Language(tsjs.language()))
+        return parser.parse(bytes(source_text, "utf-8"))
+    except Exception:
+        return None
+
+
+def _ts_walk(node):
+    yield node
+    for child in node.children:
+        yield from _ts_walk(child)
+
+
+def _js_call_label(func_text: str, aliases: dict[str, str]) -> str | None:
+    m = _JS_NAME_RE.match(func_text)
+    root = m.group(0) if m else None
+    return aliases[root] if root in aliases else canonical_sink(func_text + '(')
+
+
+def _js_call_sinks(source_text: str) -> dict[int, str] | None:
+    """JS/TS counterpart of _python_call_sinks (tree-sitter). Returns None
+    when tree-sitter is unavailable (caller falls back to text matching)."""
+    tree = _js_parse(source_text)
+    if tree is None:
+        return None
+    src = bytes(source_text, "utf-8")
+    aliases = _js_sdk_aliases(source_text)
+    by_line: dict[int, str] = {}
+    for node in _ts_walk(tree.root_node):
+        if node.type != "call_expression":
+            continue
+        func = node.child_by_field_name("function")
+        if func is None:
+            continue
+        label = _js_call_label(src[func.start_byte:func.end_byte].decode("utf-8", "ignore"), aliases)
+        if not label:
+            continue
+        for ln in range(node.start_point[0] + 1, node.end_point[0] + 2):
+            if ln not in by_line or _rank(label) < _rank(by_line[ln]):
+                by_line[ln] = label
+    return by_line
 
 
 def _js_taint_analysis(
@@ -413,11 +830,12 @@ def _js_taint_analysis(
     JS/TS taint analysis using tree-sitter-javascript.
     Falls back gracefully if tree-sitter is not installed.
 
-    Taint propagates through `const x = …` / `x = …` when an identifier on
-    the right-hand side is tainted (identifier tokens, not substrings). A
-    call is a sink when its callee (the `function` field) is recognised by
-    scanners/sinks.py; a tainted identifier anywhere in its arguments —
-    including inside object literals and arrays — is reported.
+    Taint propagates through `const x = …` / `x = …` when the right-hand side
+    carries PII: a tainted identifier, or an identifier / property whose own
+    name is a PII word (string contents are ignored). A variable carries the
+    full set of categories. A call is a sink when its callee is recognised by
+    scanners/sinks.py or is an SDK alias (`mp.track`); one finding is
+    reported per PII category in its arguments.
 
     Returns list of {file_path, line_number, pii_category, sink, raw_text}.
     """
@@ -425,71 +843,67 @@ def _js_taint_analysis(
     if not line_findings:
         return taint_findings
 
-    try:
-        from tree_sitter import Language, Parser
-        import tree_sitter_javascript as tsjs
-    except ImportError:
-        # tree-sitter not installed — skip JS taint silently
-        return taint_findings
-
-    try:
-        JS_LANGUAGE = Language(tsjs.language())
-        parser = Parser(JS_LANGUAGE)
-        tree = parser.parse(bytes(source_text, "utf-8"))
-    except Exception:
+    tree = _js_parse(source_text)
+    if tree is None:
         return taint_findings
 
     src_bytes = bytes(source_text, "utf-8")
     lines = source_text.splitlines()
-    tainted_names = _seed_taint(lines, line_findings)
+    tainted = _seed_taint(lines, line_findings, 'js')
+    aliases = _js_sdk_aliases(source_text)
 
     def _node_text(node) -> str:
         return src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
 
-    def _idents(text: str) -> set[str]:
-        return {t.lower() for t in _IDENT_RE.findall(text)}
+    def _text_cats(text: str) -> set[PIICategory]:
+        # blank string contents so words inside literals don't count
+        for s, e in reversed(_string_spans(text, 'js')):
+            text = text[:s] + ' ' * (e - s) + text[e:]
+        out: set[PIICategory] = set()
+        for ident in _IDENT_RE.findall(text):
+            out |= tainted.get(ident.lower(), set())
+            out |= _own_pii(ident)
+        return out
 
-    def _walk(node):
-        yield node
-        for child in node.children:
-            yield from _walk(child)
-
-    # Propagate taint through variable declarations / assignments
-    for node in _walk(tree.root_node):
-        if node.type in ("variable_declarator", "assignment_expression"):
+    for _ in range(5):
+        changed = False
+        for node in _ts_walk(tree.root_node):
+            if node.type not in ("variable_declarator", "assignment_expression"):
+                continue
             lhs = node.child_by_field_name("name") or node.child_by_field_name("left")
             rhs = node.child_by_field_name("value") or node.child_by_field_name("right")
             if lhs is None or rhs is None:
                 continue
-            propagate_cat = next(
-                (tainted_names[n] for n in _idents(_node_text(rhs)) if n in tainted_names),
-                None,
-            )
-            if propagate_cat:
-                for ident in _idents(_node_text(lhs)):
-                    tainted_names.setdefault(ident, propagate_cat)
+            cats = _text_cats(_node_text(rhs))
+            if not cats:
+                continue
+            for ident in _IDENT_RE.findall(_node_text(lhs)):
+                cur = tainted.setdefault(ident.lower(), set())
+                if not cats <= cur:
+                    cur |= cats
+                    changed = True
+        if not changed:
+            break
 
-    # Detect tainted args at sink call sites
-    for node in _walk(tree.root_node):
+    for node in _ts_walk(tree.root_node):
         if node.type != "call_expression":
             continue
         func = node.child_by_field_name("function")
         args = node.child_by_field_name("arguments")
         if func is None or args is None:
             continue
-        sink = canonical_sink(_node_text(func) + '(')
+        sink = _js_call_label(_node_text(func), aliases)
         if not sink:
             continue
-        hit = next((a for a in _idents(_node_text(args)) if a in tainted_names), None)
-        if hit:
-            line_no = node.start_point[0] + 1
-            raw = lines[line_no - 1] if line_no - 1 < len(lines) else ""
+        line_no = node.start_point[0] + 1
+        raw = (lines[line_no - 1] if line_no - 1 < len(lines) else "").strip()[:200]
+        for cat in sorted(_text_cats(_node_text(args)), key=lambda c: c.value):
             taint_findings.append({
                 "file_path":    file_path,
                 "line_number":  line_no,
-                "pii_category": tainted_names[hit],
+                "pii_category": cat,
                 "sink":         sink,
-                "raw_text":     raw.strip()[:200],
+                "raw_text":     raw,
             })
 
     return taint_findings
@@ -527,9 +941,13 @@ def _scan_single_file(
         is_py = file_obj.path.endswith(PY_EXTS)
         is_js = file_obj.path.endswith(JS_EXTS)
 
-        # Docstring-tracking state (Python triple-quoted strings)
-        _in_docstring    = False
-        _docstring_delim = '"""'
+        # Python docstrings / bare string statements, located with ast
+        _docstring_lines = _python_docstring_lines(source_text) if is_py else set()
+        # Sink of each line = the sink call that ENCLOSES it (ast for Python,
+        # tree-sitter for JS/TS), so multi-line calls and SDK aliases work.
+        # None when the file can't be parsed → fall back to text matching.
+        _call_sinks = (_python_call_sinks(source_text) if is_py
+                       else _js_call_sinks(source_text) if is_js else None)
         # JS/TS block comments  /* ... */  and  /** ... */
         _in_block_comment = False
 
@@ -551,26 +969,9 @@ def _scan_single_file(
             stripped = line.strip()
 
             # ── Docstring skip (Python only) ──────────────────────────
-            # Triple-quoted strings are docstrings / multi-line literals.
-            # They name SDKs and PII in prose, not in executable code.
-            if is_py:
-                if _in_docstring:
-                    if _docstring_delim in stripped:
-                        _in_docstring = False
-                    continue          # always skip body lines
-                else:
-                    _hit_delim = None
-                    for _delim in ('"""', "'''"):
-                        if stripped.startswith(_delim):
-                            _hit_delim = _delim
-                            rest = stripped[3:]
-                            if _delim not in rest:
-                                # opening of a multi-line docstring
-                                _in_docstring    = True
-                                _docstring_delim = _delim
-                            break
-                    if _hit_delim is not None:
-                        continue   # skip the opening/single-line docstring
+            # Docstrings name SDKs and PII in prose, not in executable code.
+            if is_py and line_num in _docstring_lines:
+                continue
 
             # Skip pure-comment lines (Python # and JS/TS //) ─────────
             if is_py and stripped.startswith('#'):
@@ -598,21 +999,20 @@ def _scan_single_file(
                 if stripped.startswith('//'):
                     continue   # remaining // comment after block-comment strip
 
-            # For lines with trailing inline comments, use only the code part
-            # for sink detection so comment text doesn't trigger false matches.
-            code_part = line
-            if is_py and '#' in line:
-                code_part = line.split('#')[0]
-            elif is_js and '//' in line:
-                code_part = line.split('//')[0]
+            # Drop a trailing inline comment (string-aware) and use only the
+            # code part for PII matching AND sink detection, so comment text
+            # neither creates findings nor hides a sink.
+            code_part = _strip_inline_comment(line, 'py' if is_py else 'js')
+            code_stripped = code_part.strip()
 
             # Canonical sink on this line (SDK > HTTP > queue > logger),
             # shared label vocabulary with the rule engine.
-            line_sink = canonical_sink(code_part)
+            line_sink = (_call_sinks.get(line_num) if _call_sinks is not None
+                         else canonical_sink(code_part))
 
             # ── Pass 1: regex on normalised identifiers ───────────────
-            categories = _pass1_categories(_normalise_identifiers(line))
-            if PIICategory.AADHAAR in categories and not _validate_aadhaar(line):
+            categories = _pass1_categories(_normalise_identifiers(code_part))
+            if PIICategory.AADHAAR in categories and not _validate_aadhaar(code_part):
                 categories.remove(PIICategory.AADHAAR)   # Verhoeff fails — skip
 
             for category in categories:
@@ -622,19 +1022,22 @@ def _scan_single_file(
             # ── Pass 2: Presidio NER + India regex ────────────────────
             # Skipped for bare field/schema declarations (no literal content
             # for NER to analyze — see _BARE_FIELD_DECL_RE above).
-            if not categories and len(stripped) > 10 and not _BARE_FIELD_DECL_RE.match(line):
+            if not categories and len(code_stripped) > 10 and not _BARE_FIELD_DECL_RE.match(code_part):
                 seen_p2: set[PIICategory] = set()
-                for hit in sorted(scan_text_with_presidio(line)):
+                for hit, h_start, h_end in sorted(scan_text_with_presidio_spans(code_part)):
                     if hit not in PRESIDIO_MAP:
                         continue
                     cat, sens = PRESIDIO_MAP[hit]
                     if cat in seen_p2:
                         continue
+                    if hit in ("PERSON", "LOCATION") and not _plausible_ner_span(
+                            code_part, h_start, h_end, 'py' if is_py else 'js'):
+                        continue
                     # Value-level validation: the same checks as Pass 1,
                     # so Pass 2 can never re-admit what Pass 1 rejected.
-                    if cat == PIICategory.AADHAAR and not _aadhaar_value_valid(line):
+                    if cat == PIICategory.AADHAAR and not _aadhaar_value_valid(code_part):
                         continue
-                    if cat == PIICategory.PAN and not _pan_value_valid(line):
+                    if cat == PIICategory.PAN and not _pan_value_valid(code_part):
                         continue
                     seen_p2.add(cat)
                     _add("presidio_scanner", line_num, line, hit.lower(), cat, sens, line_sink)
@@ -646,17 +1049,19 @@ def _scan_single_file(
         elif is_js:
             taint_results = _js_taint_analysis(source_text, file_obj.path, line_pii)
 
-        # Snapshot pass-1/2 findings ONCE so taint results at the same
-        # line as each other (different PII categories) are not suppressed.
-        existing_pass12 = {(f.file_path, f.line_number) for f in file_findings}
+        # Snapshot pass-1/2 findings ONCE, keyed by (file, line, category):
+        # a taint hit is only redundant if pass 1/2 already reported the SAME
+        # category on that line. Keying on (file, line) alone dropped e.g. an
+        # email reaching print() whenever the same print() line also named
+        # a phone number.
+        existing_pass12 = {(f.file_path, f.line_number, f.pii_category) for f in file_findings}
         existing_taint_keys: set = set()  # (file_path, line_number, pii_category)
 
         for tr in taint_results:
             cat = tr["pii_category"]
 
-            # Skip if pass-1/2 already caught a finding at the same line
-            line_key = (tr["file_path"], tr["line_number"])
-            if line_key in existing_pass12:
+            # Skip if pass-1/2 already caught this category at the same line
+            if (tr["file_path"], tr["line_number"], cat) in existing_pass12:
                 continue
 
             # Skip if taint already reported the same (file, line, category)

@@ -152,18 +152,29 @@ def scan_text_with_presidio(text: str) -> list:
     PERSON results are filtered against _PERSON_FALSE_POSITIVES so SDK class
     names like 'Mixpanel' or 'Firebase' are not mistaken for real person names.
     """
-    found = []
+    return list({label for label, _, _ in scan_text_with_presidio_spans(text)})
+
+
+def scan_text_with_presidio_spans(text: str) -> list[tuple[str, int, int]]:
+    """
+    Same detection as scan_text_with_presidio(), but returns
+    (entity_type, start, end) so the caller can check WHERE in a line of
+    code an entity was found (the code scanner only accepts PERSON /
+    LOCATION hits inside a name-like string literal).
+    """
+    found: list[tuple[str, int, int]] = []
 
     # India-specific regex first
     for label, pattern in INDIA_PATTERNS.items():
-        if label == "AADHAAR":
-            # Shape alone isn't enough for Aadhaar — require a Verhoeff pass
-            # (see _extract_valid_aadhaar above). PAN/PHONE have no public
-            # checksum standard, so they stay shape-only like before.
-            if _extract_valid_aadhaar(text):
-                found.append(label)
-        elif re.search(pattern, text):
-            found.append(label)
+        for m in re.finditer(pattern, text):
+            if label == "AADHAAR":
+                # Shape alone isn't enough for Aadhaar — require a Verhoeff
+                # pass. PAN/PHONE have no public checksum standard, so they
+                # stay shape-only like before.
+                digits = re.sub(r'\s', '', m.group(0))
+                if not (len(digits) == 12 and verhoeff_checksum_valid(digits)):
+                    continue
+            found.append((label, m.start(), m.end()))
 
     # Presidio NER
     analyzer = get_analyzer()
@@ -185,8 +196,8 @@ def scan_text_with_presidio(text: str) -> list:
                     matched = text[r.start:r.end].strip().lower()
                     if matched in _LOCATION_FALSE_POSITIVES:
                         continue
-                found.append(r.entity_type)
+                found.append((r.entity_type, r.start, r.end))
         except Exception as e:
             print(f"[presidio] Analysis error: {e}")
 
-    return list(set(found))
+    return found

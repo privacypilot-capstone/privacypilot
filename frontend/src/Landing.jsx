@@ -272,7 +272,7 @@ function ScanTerminal() {
 const FEATURES = [
   { icon: <FI.Scan />,     title: 'Code-Aware PII Detection',  desc: 'Regex + NER classifiers scan every file in your repository — not just surface strings but contextual PII usage across 20+ categories.' },
   { icon: <FI.Doc />,      title: 'Privacy Policy Parsing',    desc: 'Extracts which PII types your privacy policy claims to collect, then cross-references them against real code behaviour.' },
-  { icon: <FI.Link />,     title: 'Consent Gap Detection',     desc: 'Surfaces PII found in code that is absent from your policy — the exact disclosure failures regulators look for under DPDPA Section 6.' },
+  { icon: <FI.Link />,     title: 'Consent Gap Detection',     desc: 'Surfaces PII found in code that is absent from your policy — the exact notice failures under DPDPA Section 5, which also undermine consent under Section 6(1).' },
   { icon: <FI.Scale />,    title: 'DPDPA Rule Engine',         desc: 'Runs five automated checks — S.5 notice gap, S.6(1) consent validity, S.8(2) processor contracts, S.8(5) security safeguards, and Rule 3(b)(ii) purpose clarity — with severity-weighted scoring.' },
   { icon: <FI.Sparkle />,  title: 'AI Executive Summary',      desc: 'Gemini or Claude generates board-ready compliance narratives with prioritised remediation steps — in seconds, not weeks.' },
   { icon: <FI.FileDown />, title: 'Instant PDF Reports',       desc: 'Professional audit-ready reports for DPOs and legal teams, downloadable with a single click after every scan.' },
@@ -280,7 +280,7 @@ const FEATURES = [
 
 const DPDP_SECTIONS = [
   { id: 'S.5',        slug: 'section-5',   title: 'Notice Gap Detection',      desc: 'Cross-references every PII category found in source code against your privacy policy — surfaces any data collected without prior notice, the foundational obligation under Section 5.' },
-  { id: 'S.6·1',      slug: 'section-6-1', title: 'Consent Validity',          desc: 'Flags PII collected without adequate disclosure, making consent legally invalid. Consent under Section 6(1) must be free, specific, informed, and unambiguous — all three fail without proper notice.' },
+  { id: 'S.6·1',      slug: 'section-6-1', title: 'Consent Validity',          desc: 'Flags PII collected without adequate disclosure, making consent legally invalid. Consent under Section 6(1) must be free, specific, informed, unconditional and unambiguous, with a clear affirmative action — it cannot be informed without proper notice.' },
   { id: 'S.8·2',      slug: 'section-8-2', title: 'Processor Contract Check',  desc: 'Detects PII transmitted to third-party SDKs, outbound HTTP calls and message queues, then checks whether your policy names each SDK — Section 8(2) allows a data processor to be engaged only under a valid contract.' },
   { id: 'S.8·5',      slug: 'section-8-5', title: 'Security Safeguard Audit',  desc: 'Identifies personal data appearing in logger, print, or monitoring-sink statements. Section 8(5) requires reasonable security safeguards to prevent a personal data breach — PII in logs is a common leak.' },
   { id: 'Rule 3(b)(ii)',   slug: 'rule-3-b',    title: 'Purpose Clarity Check',     desc: 'Compares each purpose sentence in your policy with six reference purposes using sentence embeddings — when the top-2 similarity scores fall within 0.08 of each other, the statement is flagged as ambiguous under DPDP Rules 2025 Rule 3(b)(ii).' },

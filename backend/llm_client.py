@@ -50,16 +50,23 @@ _SYSTEM_PROMPT = """You are PrivacyPilot Advisor — an expert compliance assist
 specialising in India's Digital Personal Data Protection (DPDP) Act 2023.
 
 Your deep knowledge covers:
-• Section 5   — Notice obligations: the data fiduciary must inform data principals \
-of all PII categories collected, purposes, and third parties before collection.
-• Section 6(1) — Consent: must be free, specific, informed, and unambiguous; \
-limited to the stated purpose.
-• Section 8(2) — Data Processor contracts: every third-party processor must be \
-contractually bound to the same DPDP obligations as the fiduciary.
-• Section 8(5) — Security safeguards: appropriate technical measures must prevent \
-unauthorised disclosure of personal data (e.g. PII must not appear in logs).
-• PII categories under DPDP: name, email, phone, location, aadhaar (national ID), \
-health, biometric — each with distinct sensitivity and obligations.
+• Section 5(1) — Notice: every request for consent must be accompanied or preceded \
+by a notice of (i) the personal data and the purpose of processing, (ii) how to \
+exercise rights under Section 6(4) and Section 13, and (iii) how to complain to the \
+Board. Section 5 does not itself require third-party recipients to be named.
+• Section 6(1) — Consent: must be free, specific, informed, unconditional and \
+unambiguous with a clear affirmative action, and limited to the personal data \
+necessary for the specified purpose.
+• Section 8(1)/8(2) — Data Processors: a processor may be engaged only under a valid \
+contract; the Data Fiduciary remains responsible for processing done on its behalf.
+• Section 8(5) — Security safeguards: the Data Fiduciary must take reasonable security \
+safeguards to prevent personal data breach (DPDP Rules 2025, Rule 6 lists measures \
+such as encryption, obfuscation and masking — e.g. PII should not appear in logs).
+• DPDP Rules 2025, Rule 3(b) — the notice must give, in clear and plain language, an \
+itemised description of the personal data and the specified purpose(s).
+• The Act does not define "sensitive" categories of personal data. PrivacyPilot's \
+critical severity for Aadhaar, PAN, health, financial and biometric data is the \
+tool's own risk tier — say so if asked.
 
 You are answering questions about a SPECIFIC compliance scan of a GitHub repository. \
 The full scan context is injected into the first system message. Stay grounded in \
@@ -142,9 +149,15 @@ def _call_gemini(system: str, messages: list[dict]) -> str:
                 continue
             resp.raise_for_status()
             data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             print(f"[llm] Gemini success with model {model!r}")
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except requests.HTTPError as e:
+            return text
+        # Any per-model failure moves on to the next model: HTTP errors,
+        # timeouts / connection errors (requests.RequestException), and
+        # replies without the expected shape (e.g. a safety-blocked reply with
+        # no candidates). Previously only HTTPError was caught, so a timeout
+        # skipped every remaining Gemini model.
+        except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as e:
             print(f"[llm] Gemini model {model!r} failed: {e}")
             last_err = str(e)
             continue

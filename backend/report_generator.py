@@ -1,4 +1,14 @@
+import re
 from datetime import datetime
+from html import escape as _esc
+
+from database import scan_gap_categories
+
+
+def _e(value) -> str:
+    """HTML-escape any value for the report. Evidence quotes text taken from
+    the scanned privacy policy and repository, so nothing is trusted."""
+    return _esc("" if value is None else str(value), quote=True)
 
 
 def generate_report_html(scan, violations, findings, compliance, narrative: str | None = None) -> str:
@@ -21,13 +31,13 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
         violations_html += f"""
         <div class="violation">
             <div class="violation-header">
-                <span class="section">{v.dpdp_section} — {v.section_title}</span>
-                <span class="badge" style="background:{color}">{v.severity.upper()}</span>
+                <span class="section">{_e(v.dpdp_section)} — {_e(v.section_title)}</span>
+                <span class="badge" style="background:{color}">{_e((v.severity or '').upper())}</span>
             </div>
             <div class="violation-body">
-                <p><strong>PII Type:</strong> {v.pii_category}</p>
-                <p><strong>Evidence:</strong> {v.evidence}</p>
-                <p class="fix"><strong>Recommended Fix:</strong> {v.recommendation}</p>
+                <p><strong>PII Type:</strong> {_e(v.pii_category)}</p>
+                <p><strong>Evidence:</strong> {_e(v.evidence)}</p>
+                <p class="fix"><strong>Recommended Fix:</strong> {_e(v.recommendation)}</p>
             </div>
         </div>
         """
@@ -37,32 +47,34 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
     for f in findings[:10]:
         findings_html += f"""
         <tr>
-            <td>{f.pii_category}</td>
-            <td>{f.sensitivity}</td>
-            <td>{f.file_path or 'N/A'}</td>
-            <td>{f.line_number or 'N/A'}</td>
-            <td>{f.source}</td>
+            <td>{_e(f.pii_category)}</td>
+            <td>{_e(f.sensitivity)}</td>
+            <td>{_e(f.file_path or 'N/A')}</td>
+            <td>{_e(f.line_number or 'N/A')}</td>
+            <td>{_e(f.source)}</td>
         </tr>
         """
 
     score_color = compliance.get("color", "#333")
-    score       = compliance.get("score_display", compliance.get("score", 0))
-    rating      = compliance.get("rating", "Unknown")
+    score       = _e(compliance.get("score_display", compliance.get("score", 0)))
+    rating      = _e(compliance.get("rating", "Unknown"))
     critical    = compliance.get("critical_count", 0)
     high        = compliance.get("high_count", 0)
 
-    # Deduplicated gap chips — computed before the f-string to avoid lambda-in-fstring issues
-    _gap_cats = sorted(dict.fromkeys(f.pii_category for f in findings if f.is_gap))
+    # Gap chips from the persisted gap list (falls back to stored findings
+    # for scans saved before Scan.gap_categories existed).
+    _gap_cats = scan_gap_categories(scan, findings)
     gaps_html = (
-        "".join(f'<span class="gap-tag">{c}</span>' for c in _gap_cats)
+        "".join(f'<span class="gap-tag">{_e(c)}</span>' for c in _gap_cats)
         if _gap_cats else '<p style="color:#888">No gaps detected.</p>'
     )
 
     # ── Narrative (LLM executive summary) ──────────────────────────────────
     if narrative:
-        # Convert **bold** markdown to <strong> and split paragraphs
+        # Escape the LLM text first, THEN convert **bold** to <strong>, so
+        # model output (which can echo policy text) cannot inject HTML.
         def _md_to_html(text):
-            text = __import__('re').sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', _e(text))
             paras = [p.strip() for p in text.split('\n\n') if p.strip()]
             return '\n'.join(f'<p>{p}</p>' for p in paras)
         narrative_html = f'''
@@ -190,7 +202,7 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
   <div class="meta-grid">
     <div class="meta-item">
       <label>Repository</label>
-      <span>{scan.repo_url.replace('https://github.com/', '')}</span>
+      <span>{_e(scan.repo_url.replace('https://github.com/', ''))}</span>
     </div>
     <div class="meta-item">
       <label>Scan Date</label>

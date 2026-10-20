@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from scanners.code_scanner import scan_github_repo
 from scanners.policy_parser import parse_privacy_policy
 from dpdp.rule_engine import run_dpdp_rules
-from database import (create_tables, migrate_tables, get_db,
+from database import (create_tables, migrate_tables, get_db, scan_gap_categories,
                        Scan, Finding, Violation, ChatSession, ChatMessage)
 from scoring import calculate_compliance_score
 from report_generator import generate_report_html
@@ -275,9 +275,7 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
         "findings_count":   scan.findings_count or 0,
         "violations_count": scan.violations_count or 0,
         "gaps_count":       scan.gaps_count or 0,
-        "gaps_detected": list({
-            f.pii_category for f in findings if f.is_gap
-        }),
+        "gaps_detected": scan_gap_categories(scan, findings),
         "compliance": compliance,
         "violations": [
             {
@@ -343,7 +341,7 @@ def get_report(
                 "repo_url":            scan.repo_url,
                 "policy_url":          scan.policy_url,
                 "code_findings_count": scan.findings_count or 0,
-                "gaps_detected":       list({f.pii_category for f in findings if f.is_gap}),
+                "gaps_detected":       scan_gap_categories(scan, findings),
                 "compliance":          compliance,
                 "violations": [
                     {
@@ -430,7 +428,7 @@ def get_scan_summary(scan_id: int, db: Session = Depends(get_db)):
         "repo_url":             scan.repo_url,
         "policy_url":           scan.policy_url,
         "code_findings_count":  scan.findings_count or 0,
-        "gaps_detected":        list({f.pii_category for f in findings if f.is_gap}),
+        "gaps_detected":        scan_gap_categories(scan, findings),
         "compliance":           compliance,
         "violations":           [
             {
@@ -535,7 +533,7 @@ def send_chat_message(
         "repo_url":            scan.repo_url,
         "policy_url":          scan.policy_url,
         "code_findings_count": scan.findings_count or 0,
-        "gaps_detected":       list({f.pii_category for f in findings if f.is_gap}),
+        "gaps_detected":       scan_gap_categories(scan, findings),
         "compliance":          compliance,
         "violations": [
             {

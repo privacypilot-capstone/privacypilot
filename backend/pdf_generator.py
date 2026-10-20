@@ -6,6 +6,16 @@ from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 import io
 import re
+from xml.sax.saxutils import escape as _xml_escape
+
+from database import scan_gap_categories
+
+
+def _x(value) -> str:
+    """Escape text for a ReportLab Paragraph, which parses its input as
+    markup: evidence such as "<b>unclosed" or "<img …>" (quoted from the
+    scanned policy) otherwise raises ValueError and the PDF fails."""
+    return _xml_escape("" if value is None else str(value))
 
 def generate_pdf(scan, violations, findings, compliance, narrative: str | None = None) -> bytes:
     buffer = io.BytesIO()
@@ -18,6 +28,10 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     RED   = HexColor('#dc3545')
     ORANGE= HexColor('#fd7e14')
     GREEN = HexColor('#28a745')
+    AMBER = HexColor('#ffc107')
+    # Same four-colour scale as the HTML report (medium/low were drawn in
+    # the same orange as high before).
+    SEVERITY_COLORS = {'critical': RED, 'high': ORANGE, 'medium': AMBER, 'low': GREEN}
     score_color = HexColor(compliance.get('color', '#333333'))
 
     title_style = ParagraphStyle('title', fontSize=20, textColor=white,
@@ -77,7 +91,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
 
     score_table = Table([
         [Paragraph(f'{score}<font size="18" color="#aaaaaa">/100</font>', score_style)],
-        [Paragraph(f'{rating} Compliance', rating_style)],
+        [Paragraph(f'{_x(rating)} Compliance', rating_style)],
         [Paragraph(f'{critical} critical · {high} high severity violations', detail_style)],
     ], colWidths=[W])
     score_table.setStyle(TableStyle([
@@ -106,9 +120,9 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
             fontName='Helvetica-Bold', spaceAfter=4,
         )
 
-        # Convert **bold** markdown to <b> tags (ReportLab supports <b>)
+        # Escape first, then convert **bold** markdown to <b> tags
         def _md_to_pdf(text):
-            return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+            return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', _x(text))
 
         # Wrap in a light-blue background table
         paras = [p.strip() for p in narrative.split('\n\n') if p.strip()]
@@ -159,9 +173,9 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(Paragraph(f'Consent Gaps Detected ({scan.gaps_count})', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     story.append(Spacer(1, 2*mm))
-    gaps = list({f.pii_category for f in findings if f.is_gap})
+    gaps = scan_gap_categories(scan, findings)
     if gaps:
-        gap_text = '  ·  '.join(gaps)
+        gap_text = _x('  ·  '.join(gaps))
         story.append(Paragraph(
             f'These PII types are in the code but NOT in the privacy policy: <b>{gap_text}</b>',
             body_style
@@ -176,11 +190,11 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(Spacer(1, 2*mm))
 
     for v in violations:
-        sev_color = RED if v.severity == 'critical' else ORANGE
-        sev_label = v.severity.upper()
+        sev_color = SEVERITY_COLORS.get(v.severity, ORANGE)
+        sev_label = _x((v.severity or '').upper())
 
         v_header = Table([[
-            Paragraph(f'{v.dpdp_section} — {v.section_title}',
+            Paragraph(f'{_x(v.dpdp_section)} — {_x(v.section_title)}',
                 ParagraphStyle('vh', fontSize=10, fontName='Helvetica-Bold', textColor=black)),
             Paragraph(sev_label,
                 ParagraphStyle('vb', fontSize=8, fontName='Helvetica-Bold',
@@ -198,9 +212,9 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
 
         v_body = Table([[
             Paragraph(
-                f'<b>PII Type:</b> {v.pii_category}<br/>'
-                f'<b>Evidence:</b> {v.evidence}<br/>'
-                f'<font color="#2d6a4f"><b>Fix:</b> {v.recommendation}</font>',
+                f'<b>PII Type:</b> {_x(v.pii_category)}<br/>'
+                f'<b>Evidence:</b> {_x(v.evidence)}<br/>'
+                f'<font color="#2d6a4f"><b>Fix:</b> {_x(v.recommendation)}</font>',
                 small_style
             )
         ]], colWidths=[W])

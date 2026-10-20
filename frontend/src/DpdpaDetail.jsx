@@ -7,13 +7,13 @@ const SECTIONS = [
     label: 'Notice',
     title: 'Notice — Disclosure Before Collection',
     act: 'DPDP Act 2023',
-    what: 'A Data Fiduciary must give the Data Principal a clear notice before or at the point of collecting personal data. The notice must state every category of personal data collected, the specific purpose for which it is collected, and how the Data Principal can withdraw consent or exercise their rights under the Act.',
+    what: 'Every request for consent must be accompanied or preceded by a notice from the Data Fiduciary. Under Section 5(1) the notice must state (i) the personal data and the purpose for which it is to be processed, (ii) how the Data Principal can withdraw consent and exercise their rights under Sections 6(4) and 13, and (iii) how they can complain to the Data Protection Board. Rule 3 of the DPDP Rules 2025 adds that it must give an itemised description of the personal data in clear and plain language.',
     why: 'Notice is the foundation of consent. Without disclosure, no consent can be free, specific, or informed. Section 5 is the first obligation regulators check because every downstream violation — undisclosed sharing, purpose creep, retention issues — can be traced back to a deficient notice.',
     howpp: [
       'Scans every source file to build a catalogue of all PII categories handled by the codebase.',
       'Parses the privacy policy to extract which PII categories it discloses to users.',
       'Computes the set difference — any category found in code but absent from the policy is a Section 5 violation.',
-      'Severity is elevated to "critical" for sensitive categories (Aadhaar, biometric, health, financial, PAN).',
+      'Severity is elevated to "critical" for high-risk categories (Aadhaar, biometric, health, financial, PAN). This is PrivacyPilot\'s own risk tier — the Act does not define a sensitive class of personal data.',
     ],
     example: {
       code: '// users.js\nconst profile = { email, phone, aadhaar_hash };',
@@ -27,7 +27,7 @@ const SECTIONS = [
     label: 'Consent',
     title: 'Consent — Free, Specific, Informed, Unambiguous',
     act: 'DPDP Act 2023',
-    what: 'Consent under the DPDP Act must be freely given, specific to the stated purpose, informed by a proper notice, and unambiguous — meaning it requires a clear affirmative action. Pre-ticked boxes, bundled consent, or consent obtained after incomplete notice are invalid.',
+    what: 'Consent under Section 6(1) must be free, specific, informed, unconditional and unambiguous, given with a clear affirmative action, and limited to the personal data necessary for the specified purpose. Pre-ticked boxes, bundled consent, or consent obtained after incomplete notice do not meet this standard.',
     why: 'Section 6(1) makes consent the primary legal basis for processing personal data for Indian Data Fiduciaries. Any processing that happens without valid consent — even if the data is collected legitimately — is a standalone violation. It is also triggered whenever Section 5 is violated, because notice is a precondition of informed consent.',
     howpp: [
       'Rule 1 (Notice Gap) fires jointly under Section 5 and Section 6(1) — undisclosed collection automatically invalidates consent.',
@@ -46,19 +46,19 @@ const SECTIONS = [
     label: 'Processor Contracts',
     title: 'Data Processor Contracts — Third-Party Obligations',
     act: 'DPDP Act 2023',
-    what: 'When a Data Fiduciary engages a Data Processor (any entity that processes personal data on its behalf), it must have a valid contract in place that binds the processor to the same obligations as the fiduciary under the Act. The fiduciary remains liable for the processor\'s compliance.',
+    what: 'Section 8(2) allows a Data Fiduciary to engage a Data Processor (any entity that processes personal data on its behalf) only under a valid contract. Under Section 8(1) the fiduciary remains responsible for complying with the Act for any processing the processor does on its behalf, and Rule 6(1)(f) of the DPDP Rules 2025 expects that contract to provide for security safeguards.',
     why: 'Most modern applications transmit personal data to dozens of third-party services — analytics SDKs, communication providers, payment processors, cloud queues. Section 8(2) ensures that outsourcing processing does not dilute user rights. Without a Data Processing Agreement (DPA), sharing is unlawful even if the policy mentions the third party.',
     howpp: [
       'Identifies every code location where a PII field is co-located with a third-party SDK call (Firebase, Mixpanel, Amplitude, Segment, Twilio, SendGrid, etc.).',
       'Also follows PII through variable assignments (AST taint analysis) to the call that sends it, so a value read on one line and sent on another is still caught.',
       'Checks whether the privacy policy names that SDK in the same sentence as that data category. A negated mention ("we never share your phone number with Twilio") does not count as disclosure.',
-      'Not named → Section 5 + Section 8(2) violation (critical for sensitive data, otherwise high). Named → a medium Section 8(2) finding only, because whether a processor contract exists cannot be verified from the policy or the code.',
-      'Sensitive category transmissions are escalated to "critical" severity.',
+      'Not named → a Section 8(2) "Undisclosed Data Processor" finding (critical for high-risk data, otherwise high). Named → a medium Section 8(2) "Processor Contract Unverified" finding, because whether a valid contract exists cannot be verified from the policy or the code.',
+      'High-risk categories (Aadhaar, PAN, health, financial, biometric — PrivacyPilot\'s own tier) are escalated to "critical" severity.',
     ],
     example: {
       code: '// onboarding.js\nmixpanel.track("signup", { email, phone });',
       violation: 'Email and phone transmitted to Mixpanel. Privacy policy does not mention Mixpanel as a data processor.',
-      fix: '1. Execute a Data Processing Agreement with Mixpanel. 2. Add Mixpanel to the policy\'s third-party processor list. 3. For sensitive data, obtain explicit separate consent for the share.',
+      fix: '1. Execute a valid contract (Data Processing Agreement) with Mixpanel. 2. Name Mixpanel in the policy\'s list of processors. 3. Minimise what is sent — e.g. an opaque user ID instead of email and phone.',
     },
   },
   {

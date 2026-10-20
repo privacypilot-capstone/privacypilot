@@ -24,7 +24,7 @@ import re
 # letter / digit / underscore (so "fingerprint(" does not contain a print call).
 _L = r'(?<![A-Za-z0-9_])'
 
-# ── Third-party SDKs (Rule 2a: Section 5 / Section 8(2)) ─────────────────────
+# ── Third-party SDKs (Rule 2a: Section 8(2)) ─────────────────────────────────
 # Right side is left open on purpose so "mixpanel_client" / "firebaseApp"
 # still count as the SDK.
 SDK_RULES: list[tuple[re.Pattern, str]] = [

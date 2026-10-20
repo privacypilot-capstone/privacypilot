@@ -4,16 +4,24 @@ DPDP Act 2023 Rule Engine
 Implements three detection rules mapped to the Act's sections:
 
   Rule 1 — Notice Gap         : Section 5 (Notice) + Section 6(1) (Consent)
-  Rule 2 — Third-Party Xmit   : Section 5 (disclosure) + Section 8(2) (processor
-                                 contracts) for SDK sinks; Section 8(5) (security
-                                 safeguards) for logger sinks
-  Rule 3 — Purpose–PII Linkage: Section 6(1) (necessity / proportionality)
+  Rule 2 — Third-Party Xmit   : Section 8(2) (processor only under a valid
+                                 contract) for SDK / HTTP / queue sinks;
+                                 Section 8(5) (security safeguards) for logger sinks
+  Rule 3 — Purpose–PII Linkage: Section 6(1) (specified purpose / necessity)
 
 Section mapping verified against DPDP Act 2023 text:
-  Sec 5   — Notice: what is collected, purpose, right to withdraw consent
-  Sec 6(1)— Consent: freely given, specific, informed, unambiguous
-  Sec 8(2)— Data processor contracts must bind processor to same obligations
-  Sec 8(5)— Technical & organisational measures to prevent unauthorised disclosure
+  Sec 5(1) — notice of (i) the personal data and the purpose of processing,
+             (ii) how to exercise rights under s.6(4) and s.13, (iii) how to
+             complain to the Board. It does NOT require recipients to be named.
+  Sec 6(1) — consent: free, specific, informed, unconditional, unambiguous,
+             clear affirmative action; limited to data necessary for the
+             specified purpose
+  Sec 8(1) — the Data Fiduciary stays responsible for processing done on its
+             behalf by a Data Processor
+  Sec 8(2) — a Data Processor may be engaged only under a valid contract
+  Sec 8(5) — reasonable security safeguards to prevent personal data breach
+             (DPDP Rules 2025, Rule 6(1)(a) lists encryption, obfuscation,
+             masking and virtual tokens as such measures)
 """
 
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
@@ -35,9 +43,9 @@ SENSITIVE_CATEGORIES = {
 # scanner and the policy parser, so every label the scanner writes is one this
 # engine recognises (previously JS / queue taint labels were raw call text
 # and never matched).
-#   SDK_LABELS    — analytics + communication SDKs  → Section 5 + 8(2)
-#   HTTP_LABELS   — outbound HTTP                     → Section 5 + 8(2)
-#   QUEUE_LABELS  — queues / brokers                  → Section 5 + 8(2)
+#   SDK_LABELS    — analytics + communication SDKs  → Section 8(2)
+#   HTTP_LABELS   — outbound HTTP                     → Section 8(2)
+#   QUEUE_LABELS  — queues / brokers                  → Section 8(2)
 #   LOGGER_LABELS — loggers / monitoring              → Section 8(5)
 ALL_SDK_SINKS = SDK_LABELS
 HTTP_SINKS    = HTTP_LABELS
@@ -62,10 +70,13 @@ LOGGER_SINKS  = LOGGER_LABELS
 #   - notification code maps to "communication" (notif/alert/email/sms).
 #   - logging code maps to "security" (its own keyword list includes
 #     "audit").
-#   - analytics code maps to "analytics" and, since tracking/telemetry is
-#     also commonly monetised, "marketing".
+#   - analytics code maps to "analytics" only. (It used to map to
+#     "marketing" too, on the reasoning that tracking is often monetised;
+#     but then any policy sentence the classifier labelled "marketing" made
+#     analytics processing look disclosed. Section 6(1) consent is for the
+#     SPECIFIED purpose, so analytics use needs an analytics purpose.)
 MODULE_TO_PURPOSE: dict[str, set[str]] = {
-    'analytics':      {'analytics', 'marketing'},
+    'analytics':      {'analytics'},
     'authentication': {'service_delivery', 'security'},
     'payment':        {'service_delivery'},
     'notification':   {'communication'},
@@ -181,8 +192,8 @@ def run_dpdp_rules(
                     ),
                     recommendation=(
                         f"1. Add an explicit entry for '{cat.value}' data to the "
-                        f"privacy policy, describing what is collected, why, and "
-                        f"how long it is retained. "
+                        f"privacy policy, describing what is collected and the "
+                        f"purpose for which it is processed (Section 5(1)(i)). "
                         f"2. Present this notice before or at the point of collection. "
                         f"3. Implement a consent gate that is gated on disclosure."
                     ),
@@ -190,8 +201,10 @@ def run_dpdp_rules(
 
     # ── Rule 2: Third-Party Transmission ────────────────────────────────────
     # PII is co-located with a third-party SDK call.
-    # • Analytics / communication SDKs → Section 5 (undisclosed sharing) +
-    #   Section 8(2) (no evidence of a data-processor contract).
+    # • SDK / HTTP / queue sinks → Section 8(2): a Data Processor may only be
+    #   engaged under a valid contract, which cannot be verified from code.
+    #   (Previously also cited as Section 5, on the claim that the notice must
+    #   name third parties — Section 5(1) contains no such requirement.)
     # • Logger sinks → Section 8(5) (security safeguard failure — logging PII
     #   risks unauthorised disclosure via log files / monitoring systems).
 
@@ -221,18 +234,21 @@ def run_dpdp_rules(
                         f"'{cat.value}' data appears in a log/print statement "
                         f"at {loc}. Logging personal data exposes it in log files, "
                         f"monitoring dashboards, and log-aggregation services. "
-                        f"Section 8(5) requires appropriate technical measures to "
-                        f"prevent unauthorised disclosure of personal data."
+                        f"Section 8(5) requires the Data Fiduciary to take "
+                        f"reasonable security safeguards to prevent personal "
+                        f"data breach."
                     ),
                     recommendation=(
-                        f"Remove or mask '{cat.value}' from all log statements. "
-                        f"Use structured logging with a PII-scrubbing filter. "
-                        f"Treat log sinks as untrusted channels for personal data."
+                        f"Remove or mask '{cat.value}' from all log statements "
+                        f"(masking and obfuscation are safeguards listed in DPDP "
+                        f"Rules 2025, Rule 6(1)(a)). Use structured logging with a "
+                        f"PII-scrubbing filter. Treat log sinks as untrusted "
+                        f"channels for personal data."
                     ),
                 ))
             continue  # logged → don't also fire SDK rules for same finding
 
-        # SDK / HTTP / Queue sink path — Section 5 + Section 8(2)
+        # SDK / HTTP / Queue sink path — Section 8(2)
         if sink_kind(sdk_lower) in ('sdk', 'http', 'queue'):
             is_sensitive = cat in SENSITIVE_CATEGORIES
 
@@ -252,12 +268,11 @@ def run_dpdp_rules(
             if key not in seen:
                 seen.add(key)
                 if is_disclosed:
-                    # Section 5's notice requirement is satisfied — the policy
-                    # already names '{sdk}' as a recipient of this data. What
-                    # remains unverifiable from the policy text or source code
-                    # alone is Section 8(2): whether an actual processor
-                    # contract exists. Flag that narrower gap instead of
-                    # repeating a false "undisclosed" claim.
+                    # The policy already names '{sdk}' as a recipient of this
+                    # data, so it is not flagged as undisclosed. What remains
+                    # unverifiable from the policy text or source code alone
+                    # is Section 8(2): whether a valid processor contract
+                    # exists. Flag that narrower gap at medium severity.
                     violations.append(DPDPViolation(
                         section="Section 8(2)",
                         title="Third-Party Transmission — Processor Contract Unverified",
@@ -265,43 +280,64 @@ def run_dpdp_rules(
                         pii_category=cat.value,
                         evidence=(
                             f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
-                            f"The privacy policy already discloses '{sdk}' as a "
-                            f"recipient of this data, satisfying Section 5's notice "
-                            f"requirement. Section 8(2) separately requires a "
-                            f"data-processing agreement binding '{sdk}' to the same "
-                            f"DPDP obligations — this cannot be verified from the "
-                            f"policy text or source code alone."
+                            f"The privacy policy already names '{sdk}' as a "
+                            f"recipient of this data. Section 8(2) permits a Data "
+                            f"Processor to be engaged only under a valid contract, "
+                            f"and under Section 8(1) the Data Fiduciary remains "
+                            f"responsible for its processing — whether such a "
+                            f"contract exists cannot be verified from the policy "
+                            f"text or source code alone."
                         ),
                         recommendation=(
-                            f"Confirm a signed Data Processing Agreement with '{sdk}' "
-                            f"is in place covering purpose, retention, and security "
-                            f"obligations."
+                            f"Confirm a valid, signed contract (Data Processing "
+                            f"Agreement) with '{sdk}' is in place, including the "
+                            f"security safeguards it must apply (DPDP Rules 2025, "
+                            f"Rule 6(1)(f))."
                         ),
                     ))
                 else:
-                    # All SDK transmissions: undisclosed third-party sharing (Section 5)
+                    # Recipient not named in the policy for THIS data. If the
+                    # policy names the SDK for other categories, say so —
+                    # otherwise readers (and the LLM summary) take it to mean
+                    # the SDK is missing from the policy altogether.
                     severity = "critical" if is_sensitive else "high"
+                    _named_for = sorted(
+                        c.value for c, sdks in (disclosed_sdks or {}).items()
+                        if sdk_lower in {s.lower() for s in sdks}
+                    )
+                    _policy_clause = (
+                        f"The privacy policy names '{sdk}' as a recipient of "
+                        f"{', '.join(_named_for)} data, but not of '{cat.value}' data."
+                        if _named_for else
+                        f"The privacy policy does not name '{sdk}' as a recipient "
+                        f"of this data."
+                    )
                     violations.append(DPDPViolation(
-                        section="Section 5 / Section 8(2)",
+                        section="Section 8(2)",
                         title="Third-Party Transmission — Undisclosed Data Processor",
                         severity=severity,
                         pii_category=cat.value,
                         evidence=(
                             f"'{cat.value}' data is transmitted to '{sdk}' at {loc}. "
-                            f"Section 5 requires the notice to identify third parties "
-                            f"that will receive personal data. Section 8(2) requires a "
-                            f"contract with every data processor that binds them to the "
-                            f"same DPDP obligations as the data fiduciary."
+                            f"{_policy_clause} Section 8(2) permits a Data "
+                            f"Processor to be engaged only under a valid contract, "
+                            f"and under Section 8(1) the Data Fiduciary remains "
+                            f"responsible for its processing."
                         ),
                         recommendation=(
-                            f"1. Disclose '{sdk}' as a data processor in the privacy policy. "
-                            f"2. Execute a Data Processing Agreement with '{sdk}' covering "
-                            f"purpose, retention, and security obligations. "
-                            f"3. For sensitive category '{cat.value}', obtain separate "
-                            f"explicit consent for this third-party share."
+                            f"1. Execute a valid contract (Data Processing Agreement) "
+                            f"with '{sdk}', including the security safeguards it must "
+                            f"apply (DPDP Rules 2025, Rule 6(1)(f)). "
+                            f"2. Name '{sdk}' as a processor in the privacy policy for "
+                            f"transparency. "
+                            f"3. '{cat.value}' is treated as high-risk by PrivacyPilot "
+                            f"(a project severity tier, not a category defined in the "
+                            f"Act): minimise or tokenise it before sharing."
                             if is_sensitive else
-                            f"1. Disclose '{sdk}' as a data processor in the privacy policy. "
-                            f"2. Execute a Data Processing Agreement with '{sdk}'."
+                            f"1. Execute a valid contract (Data Processing Agreement) "
+                            f"with '{sdk}'. "
+                            f"2. Name '{sdk}' as a processor in the privacy policy for "
+                            f"transparency."
                         ),
                     ))
 

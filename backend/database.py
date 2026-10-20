@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
+import json
 import os
 
 DATABASE_URL = os.getenv(
@@ -33,6 +34,11 @@ class Scan(Base):
     policy_count     = Column(Integer, default=0)
     gaps_count       = Column(Integer, default=0)
     violations_count = Column(Integer, default=0)
+    # JSON list of PII categories in code but absent from the policy. Stored
+    # explicitly because only the first 200 findings are persisted, so
+    # rebuilding the list from Finding.is_gap could miss categories that
+    # gaps_count includes.
+    gap_categories   = Column(Text, nullable=True)
     
 
     findings   = relationship("Finding",   back_populates="scan")
@@ -111,6 +117,7 @@ def migrate_tables():
     migrations = [
         "ALTER TABLE scans ADD COLUMN ai_summary TEXT",
         "ALTER TABLE scans ADD COLUMN error_message TEXT",
+        "ALTER TABLE scans ADD COLUMN gap_categories TEXT",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -128,6 +135,22 @@ def migrate_tables():
                 # whether they themselves would have succeeded.
                 conn.rollback()
                 print(f"[db] migration skipped: {e}")
+
+
+def scan_gap_categories(scan, findings=None) -> list[str]:
+    """
+    The scan's consent-gap categories, sorted.
+
+    Uses the persisted Scan.gap_categories list; scans saved before that
+    column existed fall back to the stored findings' is_gap flags.
+    """
+    raw = getattr(scan, "gap_categories", None)
+    if raw:
+        try:
+            return sorted(json.loads(raw))
+        except (TypeError, ValueError):
+            pass
+    return sorted({f.pii_category for f in (findings or []) if f.is_gap})
 
 
 def get_db():

@@ -12,10 +12,11 @@ Pass 2  — spaCy dependency parsing + sentence-transformer classification
 Returns: (policy_claims, purpose_map, vagueness_warnings)
 """
 
+import ipaddress
 import re
 import socket
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.sinks import sdks_named_in
 
@@ -31,20 +32,35 @@ BLOCKED_DOMAINS = {
     "metadata.google.internal",
 }
 
-BLOCKED_IP_PREFIXES = (
-    "127.", "10.", "192.168.",
-    "172.16.", "172.17.", "172.18.", "172.19.",
-    "172.20.", "172.21.", "172.22.", "172.23.",
-    "172.24.", "172.25.", "172.26.", "172.27.",
-    "172.28.", "172.29.", "172.30.", "172.31.",
-    "169.254.", "::1",
-)
+def _ip_is_blocked(ip: str) -> bool:
+    """
+    True for any address that is not a public, globally-routable unicast
+    address: loopback, RFC 1918 private, link-local (incl. 169.254.169.254
+    cloud metadata), carrier-grade NAT 100.64.0.0/10, unspecified, reserved,
+    multicast — for IPv4 and IPv6 (IPv4-mapped IPv6 is unwrapped first).
+
+    Replaces a hand-written IPv4 prefix list that missed IPv6, 100.64/10 and
+    0.0.0.0/8.
+    """
+    try:
+        addr = ipaddress.ip_address(ip.split('%')[0])   # drop IPv6 zone id
+    except ValueError:
+        return True
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return (not addr.is_global) or addr.is_multicast
 
 
 def validate_policy_url(url: str) -> None:
     """
-    SSRF protection: blocks RFC 1918, loopback, link-local, cloud metadata.
+    SSRF protection: blocks loopback, private, link-local, CGNAT, cloud
+    metadata and other non-public addresses, IPv4 and IPv6. Every address
+    the host resolves to is checked, not just the first.
     Raises ValueError with descriptive message on any failure.
+
+    fetch_policy_text() calls this again for every redirect hop. Residual
+    risk: DNS could still change between this check and the connection
+    (DNS rebinding); closing that fully needs connecting to the checked IP.
     """
     try:
         parsed = urlparse(url)
@@ -59,24 +75,28 @@ def validate_policy_url(url: str) -> None:
     if not parsed.netloc:
         raise ValueError("URL has no domain — invalid URL format.")
 
-    domain = parsed.netloc.split(":")[0].lower()
+    domain = (parsed.hostname or "").lower()   # handles [IPv6] and user@host
+    if not domain:
+        raise ValueError("URL has no domain — invalid URL format.")
     if domain in BLOCKED_DOMAINS:
         raise ValueError(
             f"Domain '{domain}' is not allowed. "
             "Localhost and internal service URLs are blocked."
         )
     try:
-        ip = socket.gethostbyname(domain)
-    except socket.gaierror:
+        infos = socket.getaddrinfo(domain, None)
+    except (socket.gaierror, UnicodeError):
         raise ValueError(
             f"Domain '{domain}' could not be resolved. "
             "Please check the URL is correct and publicly accessible."
         )
-    if ip.startswith(BLOCKED_IP_PREFIXES):
-        raise ValueError(
-            f"URL resolves to a private or internal IP address ({ip}). "
-            "Internal network URLs are blocked for security."
-        )
+    for info in infos:
+        ip = info[4][0]
+        if _ip_is_blocked(ip):
+            raise ValueError(
+                f"URL resolves to a private or internal IP address ({ip}). "
+                "Internal network URLs are blocked for security."
+            )
     print(f"[security] URL validated: {url[:80]}")
 
 
@@ -87,6 +107,73 @@ COLLECTION_CONTEXT = [
     'disclose', 'transfer', 'receive', 'gather', 'obtain',
     'retain', 'record', 'access', 'handle',
 ]
+
+
+# ── Sentence splitting (shared by Pass 1a, Pass 2 and Pass 3) ─────────────────
+# A full stop / ! / ? only ends a sentence when followed by whitespace or the
+# end of the text, so "segment.com", "v2.1" or "example.co.in" stay intact
+# (the old re.split(r'[.!?;]') cut "segment.com" into "segment" + "com", so
+# Pass 3 could never see a Segment.com disclosure). A semicolon always splits.
+# All three passes use this one splitter so they see the same sentences
+# (Pass 2 previously ignored ';' while Pass 1a and Pass 3 split on it).
+_SENTENCE_END_RE = re.compile(r'[.!?](?=\s|$)|;')
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [s.strip() for s in _SENTENCE_END_RE.split(text) if s.strip()]
+
+
+# ── Structure-aware policy units (shared by Pass 1a, Pass 2 and Pass 3) ──────
+# Policies are mostly lists: "We use your information to:" followed by
+# bullets that carry no full stops. Splitting the whitespace-collapsed text
+# on punctuation alone merged a whole section — heading, lead-in and every
+# bullet — into one "sentence", so e.g. "Twilio … (phone number only)" and
+# "Delivery partners … (name and address only)" became one sentence and
+# Twilio counted as a recipient of the name too, and the purpose classifier
+# saw several purposes at once (spurious vagueness warnings).
+# Units are built line by line instead:
+#   - a heading (markdown "#", or an HTML block, see fetch_policy_text)
+#     or a blank line ends a paragraph;
+#   - each bullet is its own unit, prefixed with the paragraph line that
+#     introduced the list when that line ends with ":" ("We use your
+#     information to: Process your orders");
+#   - paragraph text is split into sentences as before.
+_HEADING_LINE_RE = re.compile(r'^#{1,6}\s')
+_BULLET_LINE_RE = re.compile(r'^(?:[•\-\*▪◦●→]|\d+[\.\)]|[a-z]\))\s+(.+)$')
+
+
+def _policy_units(text: str) -> list[str]:
+    units: list[str] = []
+    lead_in: str | None = None
+    para: list[str] = []
+
+    def flush() -> None:
+        nonlocal lead_in
+        if not para:
+            return
+        sentences = _split_sentences(re.sub(r'\s+', ' ', ' '.join(para)).strip())
+        para.clear()
+        units.extend(sentences)
+        lead_in = sentences[-1] if sentences and sentences[-1].endswith(':') else None
+
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            flush()
+            continue
+        if _HEADING_LINE_RE.match(s):
+            flush()
+            lead_in = None
+            continue
+        m = _BULLET_LINE_RE.match(s)
+        if m:
+            flush()
+            item = re.sub(r'\s+', ' ', m.group(1)).strip()
+            units.extend(_split_sentences(f"{lead_in} {item}" if lead_in else item))
+            continue
+        para.append(s)
+    flush()
+    return units
 
 
 def _verb_forms(verb: str) -> list[str]:
@@ -351,6 +438,39 @@ PURPOSE_TEMPLATES = {
 # the purpose statement is considered ambiguous (DPDP Rules 2025, Rule 3(b)(ii))
 VAGUENESS_MARGIN = 0.08
 
+# A narrow embedding margin alone is a weak signal: short, specific bullets
+# ("Process and fulfil your orders") score low and close against all six
+# reference purposes and were flagged as vague. A Rule 3(b)(ii) warning now
+# also requires that the unit
+#   - actually states a purpose (a "to …" / "for …" purpose marker) — a bare
+#     "We collect your email address." states none, which is a Rule 3 gap,
+#     not a vague purpose; and
+#   - is ambiguous in its own words: it names TWO OR MORE purpose
+#     categories ("to provide and improve our services"), or uses stock vague
+#     wording ("for business purposes", "other purposes", "legitimate
+#     interests", "improve our services"). A unit naming no purpose keyword
+#     is NOT treated as vague — the keyword list is small, and specific
+#     purposes it does not know ("Verify your identity", "Issue completion
+#     certificates") must not be penalised.
+_PURPOSE_MARKER_RE = re.compile(r"\b(?:to|for|so that|in order to)\b", re.I)
+_VAGUE_PHRASE_RE = re.compile(
+    r"\b(?:business purposes?|other purposes|various purposes|any purpose|such purposes"
+    r"|(?:improve|enhance)\s+(?:our\s+|the\s+)?(?:services?|platform|products?|experience)"
+    r"|legitimate (?:business )?interests?|as (?:necessary|appropriate)"
+    r"|including but not limited to)\b",
+    re.I,
+)
+
+
+def _is_vague_wording(sentence: str) -> bool:
+    # A list lead-in ("We use your information to:") is an unfinished
+    # sentence; its bullets (each prefixed with it) carry the purposes.
+    if sentence.rstrip().endswith(':'):
+        return False
+    if not _PURPOSE_MARKER_RE.search(sentence):
+        return False
+    return len(_keyword_purposes(sentence)) >= 2 or bool(_VAGUE_PHRASE_RE.search(sentence))
+
 # ── Lazy-loaded NLP models ────────────────────────────────────────────────────
 
 _nlp = None
@@ -440,6 +560,34 @@ def _rewrite_github_blob_url(url: str) -> str | None:
     return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
 
 
+# Hosts a GitHub token may be sent to (the blob-URL rewrite targets the API).
+_TOKEN_HOSTS = _GITHUB_AUTH_DOMAINS | {"api.github.com"}
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
+
+
+def _get_with_safe_redirects(url: str, headers: dict):
+    """
+    GET with redirects followed MANUALLY: every hop's target is passed back
+    through validate_policy_url(), and the GitHub token is dropped as soon
+    as a hop leaves GitHub. requests' automatic redirect-following (the old
+    behaviour) fetched whatever a public URL redirected to — including
+    http://169.254.169.254/ or localhost — after only the first URL had
+    been validated.
+    """
+    headers = dict(headers)
+    for _ in range(_MAX_REDIRECTS + 1):
+        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=False)
+        location = resp.headers.get("Location") if resp.status_code in _REDIRECT_CODES else None
+        if not location:
+            return resp
+        url = urljoin(url, location)
+        validate_policy_url(url)
+        if urlparse(url).hostname not in _TOKEN_HOSTS:
+            headers.pop("Authorization", None)
+    raise ValueError(f"Could not fetch privacy policy — more than {_MAX_REDIRECTS} redirects.")
+
+
 def fetch_policy_text(url: str, github_token: str | None = None) -> tuple[str, str]:
     """
     Fetch and strip HTML.
@@ -473,7 +621,7 @@ def fetch_policy_text(url: str, github_token: str | None = None) -> tuple[str, s
     if github_token and (_api_url or urlparse(url).hostname in _GITHUB_AUTH_DOMAINS):
         headers['Authorization'] = f'Bearer {github_token}'
 
-    resp = requests.get(fetch_url, headers=headers, timeout=15)
+    resp = _get_with_safe_redirects(fetch_url, headers)
 
     # The fetch itself succeeding (no exception) does NOT mean the URL
     # pointed at an actual privacy policy. A 404/redirect-to-error page
@@ -526,8 +674,15 @@ def fetch_policy_text(url: str, github_token: str | None = None) -> tuple[str, s
     # logical reason. The only thing actually worth checking on this path
     # is the one unambiguous failure case a 200 status doesn't rule out:
     # the file existing but being empty.
+    # The same reasoning applies to any non-HTML response (a raw
+    # .md/.txt file from raw.githubusercontent.com, a gist, a CDN): those
+    # hosts return real 404 statuses, not soft-404 pages, so only an empty
+    # body is a failure there. Previously a short PRIVACY_POLICY.md fetched
+    # by its raw URL was rejected while the same file's blob URL passed.
+    _ctype = (resp.headers.get("Content-Type") or "").lower()
+    _is_html = "html" in _ctype or (not _ctype and "<html" in html[:2000].lower())
     _stripped_len = len(re.sub(r'<[^>]+>', ' ', html))
-    if _api_url:
+    if _api_url or not _is_html:
         if not html.strip():
             raise ValueError(
                 f"Could not fetch privacy policy — {url} points to an "
@@ -541,8 +696,13 @@ def fetch_policy_text(url: str, github_token: str | None = None) -> tuple[str, s
             f"be an actual privacy policy. The URL may be wrong or broken."
         )
 
-    # Preserve bullet structure by converting list tags to newlines first
-    html_with_breaks = re.sub(r'<li[^>]*>', '\n• ', html, flags=re.IGNORECASE)
+    # Preserve document structure: block elements become paragraph breaks
+    # (so headings and paragraphs are separate policy units), list items
+    # become bullet lines.
+    html_with_breaks = re.sub(
+        r'</?(?:p|div|h[1-6]|ul|ol|tr|table|section|article|header|footer|blockquote)\b[^>]*>',
+        '\n\n', html, flags=re.IGNORECASE)
+    html_with_breaks = re.sub(r'<li[^>]*>', '\n• ', html_with_breaks, flags=re.IGNORECASE)
     html_with_breaks = re.sub(r'<br\s*/?>', '\n', html_with_breaks, flags=re.IGNORECASE)
 
     # Strip script / style
@@ -560,13 +720,59 @@ def fetch_policy_text(url: str, github_token: str | None = None) -> tuple[str, s
 
 # ── Purpose extraction helpers ────────────────────────────────────────────────
 
-def _keyword_purpose(sentence: str) -> str | None:
-    """Fast keyword-based purpose detection (fallback when models unavailable)."""
+# Keywords in PURPOSE_CATEGORIES are word STEMS ("advertis", "secur"): each
+# must start at a word boundary and may be followed by more letters. A few
+# stems collide with unrelated words and get a negative lookahead.
+_PURPOSE_STEM_EXCEPTIONS = {
+    "inform": r"(?!ation|ative)",     # "inform/informed", not "information"
+}
+_PURPOSE_KW_RX: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'(?<![a-z0-9])' + re.escape(kw) + _PURPOSE_STEM_EXCEPTIONS.get(kw, '')), purpose)
+    for purpose, keywords in PURPOSE_CATEGORIES.items()
+    for kw in keywords
+]
+
+# Multi-word PII phrases ("bank account number", "health information",
+# "email address", "contact number") are blanked out before purpose matching:
+# they name the DATA, not the purpose, but contain purpose keywords
+# ("account", "inform", "email", "contact").
+_MULTIWORD_PII_RX = [rx for rx, phrase, _ in _POLICY_PHRASE_RX if ' ' in phrase]
+
+
+def _keyword_purpose_hits(sentence: str) -> list[tuple[int, str]]:
+    """(position, purpose) for every purpose keyword in the sentence, after
+    blanking multi-word PII phrases (see _keyword_purpose)."""
     s = sentence.lower()
-    for purpose, keywords in PURPOSE_CATEGORIES.items():
-        if any(kw in s for kw in keywords):
-            return purpose
-    return None
+    for rx in _MULTIWORD_PII_RX:
+        s = rx.sub(lambda m: ' ' * len(m.group(0)), s)
+    hits = []
+    for rx, purpose in _PURPOSE_KW_RX:
+        m = rx.search(s)
+        if m:
+            hits.append((m.start(), purpose))
+    return hits
+
+
+def _keyword_purposes(sentence: str) -> set[str]:
+    """All purpose categories the sentence's wording names."""
+    return {p for _, p in _keyword_purpose_hits(sentence)}
+
+
+def _keyword_purpose(sentence: str) -> str | None:
+    """
+    Keyword-based purpose detection (used by the spaCy passes on purpose
+    phrases, and as the fallback when the sentence-transformer is missing).
+
+    Previously this did `kw in s` and returned the first category in dict
+    order, so "health information" matched communication ("inform"), "bank
+    account number" matched service_delivery ("account"), "latest" matched
+    research ("test"), and an earlier category always beat the purpose
+    actually stated. Wrong purposes inflate purpose_map and hide genuine
+    Rule 3 violations. Now: PII phrases are blanked, stems match at word
+    starts only, and the purpose whose keyword appears FIRST in the text wins.
+    """
+    hits = _keyword_purpose_hits(sentence)
+    return min(hits)[1] if hits else None
 
 
 def _spacy_extract_purposes(sentences: list[str], nlp) -> dict[str, set[str]]:
@@ -656,7 +862,7 @@ def _pass1_extract_pii(
     seen: set[PIICategory] = set()
 
     # ── Pass 1a: sentence-level ───────────────────────────────────────────
-    sentences = re.split(r'[.!?;]', full_text_lower)
+    sentences = [u.lower() for u in _policy_units(raw_with_newlines)]
     for sentence in sentences:
         sentence = sentence.strip()
         if len(sentence) < 10:
@@ -704,15 +910,20 @@ def _pass1_extract_pii(
         # re-matching inside an already-consumed longer phrase ("email address").
         consumed_spans: list[tuple[int, int]] = []
         for phrase, category in BULLET_PII_MAP:
-            if category in seen:
-                continue
             # Use word-boundary regex so "pan" doesn't match inside "japan"
             m = re.search(r'\b' + re.escape(phrase) + r'\b', item_lower)
             if m:
                 # Skip if this match overlaps a span already consumed by a longer phrase
                 if any(cs[0] < m.end() and m.start() < cs[1] for cs in consumed_spans):
                     continue
+                # Consume the span even when the category is already known.
+                # Previously an already-seen category was skipped BEFORE its
+                # span was recorded, so in the bullet "Email address" (email
+                # already found by Pass 1a) the word "address" was left free
+                # and wrongly disclosed LOCATION.
                 consumed_spans.append((m.start(), m.end()))
+                if category in seen:
+                    continue
                 seen.add(category)
                 findings.append(DataFlowObject(
                     source="policy_parser_bullets",
@@ -730,9 +941,32 @@ def _pass1_extract_pii(
 
 # ── Pass 2: purpose extraction ───────────────────────────────────────────────
 
+# A purpose statement that refers to the user's data generically ("We use
+# your information to: …") names no PII category, so it used to be linked
+# to none — and Rule 3 then reported every category as having no stated
+# purpose. Such a unit is applied to every category the policy discloses.
+# It must be a USE statement (use/process), so sharing, retention or
+# "we do not sell your data" sentences are not mistaken for purposes.
+_GENERIC_DATA_RE = re.compile(
+    r"\b(?:your|personal|the|this|such|all)\s+(?:personal\s+)?(?:information|data|details)\b"
+)
+_USE_VERB_RE = re.compile(r"\b(?:use|uses|used|using|process|processes|processed|processing)\b")
+
+
+def _affirmative_part(text: str) -> str:
+    """
+    The part of a unit before its first negation word: "We use your email
+    for login, not for marketing" → "We use your email for login, ". Text
+    after a negation states what is NOT done and must not add a purpose.
+    """
+    m = _NEGATION_RE.search(text.lower())
+    return text[:m.start()] if m else text
+
+
 def _pass2_extract_purposes(
     full_text_lower: str,
     policy_pii_categories: set[PIICategory],
+    full_text_raw: str | None = None,
 ) -> tuple[dict[PIICategory, set[str]], list[dict]]:
     """
     For each PII category found in Pass 1, identify what purpose(s) the policy
@@ -756,25 +990,38 @@ def _pass2_extract_purposes(
     nlp = _get_nlp()
     st_model, template_embeddings = _get_st_model()
 
-    # Split into sentences (preserve case for spaCy)
-    raw_sentences = re.split(r'[.!?]', full_text_lower)
-    raw_sentences = [s.strip() for s in raw_sentences if len(s.strip()) > 15]
+    # Split into sentences, preserving case for spaCy: its tagger and
+    # dependency parser are trained on cased text, so the lower-cased copy
+    # (which this pass used to receive) degrades the parse. full_text_raw is
+    # the same text before lower-casing; whitespace is collapsed the same way
+    # fetch_policy_text() does for the lower-cased copy.
+    _source = full_text_raw if full_text_raw is not None else full_text_lower
+    raw_sentences = [s for s in _policy_units(_source) if len(s) > 15]
 
     # Which PII categories each sentence names — same whole-word, longest-
-    # phrase matcher as Pass 1, so Pass 2 looks at the same sentences.
+    # phrase matcher as Pass 1 (on the lower-cased sentence), so Pass 2
+    # looks at the same sentences.
     sentence_cats = [
-        (s, {c for c, _ in _find_policy_pii(s)}) for s in raw_sentences
+        (s, {c for c, _ in _find_policy_pii(s.lower())}) for s in raw_sentences
+    ]
+    generic_units = [
+        s for s, cats in sentence_cats
+        if not cats and _GENERIC_DATA_RE.search(s.lower()) and _USE_VERB_RE.search(s.lower())
     ]
 
     for cat in policy_pii_categories:
         cat_purposes: set[str] = set()
 
-        # Collect sentences mentioning this PII category
-        relevant = [s for s, cats in sentence_cats if cat in cats]
+        # Units naming this PII category, plus generic "your information" use
+        # statements (which apply to every disclosed category)
+        relevant = [s for s, cats in sentence_cats if cat in cats] + generic_units
         if not relevant:
             continue
 
-        for sent in relevant:
+        for quoted in relevant:
+            sent = _affirmative_part(quoted).strip()
+            if len(sent) < 10:
+                continue
             # ── spaCy dependency pass ──────────────────────────────────────
             if nlp:
                 spacy_results = _spacy_extract_purposes([sent], nlp)
@@ -790,11 +1037,11 @@ def _pass2_extract_purposes(
                     cat_purposes.add(best_label)
                 # Vagueness: margin between top-2 too small
                 margin = best_score - second_score
-                if margin < VAGUENESS_MARGIN and best_score >= 0.25:
+                if margin < VAGUENESS_MARGIN and best_score >= 0.25 and _is_vague_wording(sent):
                     vagueness_warnings.append({
                         "pii_category": cat.value,
                         "margin":       round(margin, 4),
-                        "sentence":     sent[:200],
+                        "sentence":     quoted[:200],
                         "top_label":    best_label,
                         "top_score":    round(best_score, 4),
                     })
@@ -863,6 +1110,7 @@ def _negated_before(sentence: str, pos: int) -> bool:
 def _pass3_extract_disclosed_sdks(
     full_text_lower: str,
     policy_pii_categories: set[PIICategory],
+    full_text_raw: str | None = None,
 ) -> dict[PIICategory, set[str]]:
     """
     Returns {PIICategory → set[sdk_name]} for every (category, SDK) pair
@@ -876,7 +1124,8 @@ def _pass3_extract_disclosed_sdks(
     if not policy_pii_categories:
         return disclosed
 
-    sentences = re.split(r'[.!?;]', full_text_lower)
+    _source = full_text_raw if full_text_raw is not None else full_text_lower
+    sentences = [u.lower() for u in _policy_units(_source)]
     for sentence in sentences:
         sentence = sentence.strip()
         if len(sentence) < 10:
@@ -931,10 +1180,12 @@ def parse_privacy_policy(
 
     # ── Pass 2: Purpose extraction ────────────────────────────────────────
     purpose_map, vagueness_warnings = _pass2_extract_purposes(
-        full_text_lower, seen_categories
+        full_text_lower, seen_categories, full_text_raw=raw_with_newlines
     )
 
     # ── Pass 3: Disclosed third-party extraction ──────────────────────────
-    disclosed_sdks = _pass3_extract_disclosed_sdks(full_text_lower, seen_categories)
+    disclosed_sdks = _pass3_extract_disclosed_sdks(
+        full_text_lower, seen_categories, full_text_raw=raw_with_newlines
+    )
 
     return findings, purpose_map, vagueness_warnings, disclosed_sdks

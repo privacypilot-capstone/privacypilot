@@ -38,8 +38,8 @@ GROUND_TRUTH_FILE = HERE / "ground_truth.json"
 # file can reference without caring about exact section wording.
 SECTION_TO_RULE = {
     "Section 5 / Section 6(1)":          "rule_1_notice_gap",
-    "Section 5 / Section 8(2)":          "rule_2_third_party",
-    "Section 8(2)":                      "rule_2_third_party",  # disclosed-SDK branch
+    "Section 8(2)":                      "rule_2_third_party",  # undisclosed + disclosed-SDK branches
+    "Section 5 / Section 8(2)":          "rule_2_third_party",  # label used by scans before Oct 2026
     "Section 8(5)":                      "rule_2_third_party",  # logger-sink branch
     "Section 6(1)":                      "rule_3_purpose_linkage",
     "DPDP Rules 2025, Rule 3(b)(ii)":     "vagueness",
