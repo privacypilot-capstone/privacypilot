@@ -1,7 +1,12 @@
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+import logging
 import re
 import threading
+
+# Presidio logs "Fetching all recognizers for language en" at INFO on every
+# analyze() call — thousands of lines per scan, drowning the worker log.
+logging.getLogger("presidio-analyzer").setLevel(logging.WARNING)
 
 # India-specific regex patterns
 INDIA_PATTERNS = {
@@ -155,16 +160,9 @@ def scan_text_with_presidio(text: str) -> list:
     return list({label for label, _, _ in scan_text_with_presidio_spans(text)})
 
 
-def scan_text_with_presidio_spans(text: str) -> list[tuple[str, int, int]]:
-    """
-    Same detection as scan_text_with_presidio(), but returns
-    (entity_type, start, end) so the caller can check WHERE in a line of
-    code an entity was found (the code scanner only accepts PERSON /
-    LOCATION hits inside a name-like string literal).
-    """
+def _india_spans(text: str) -> list[tuple[str, int, int]]:
+    """India-specific regex hits (Aadhaar must also pass Verhoeff)."""
     found: list[tuple[str, int, int]] = []
-
-    # India-specific regex first
     for label, pattern in INDIA_PATTERNS.items():
         for m in re.finditer(pattern, text):
             if label == "AADHAAR":
@@ -175,29 +173,84 @@ def scan_text_with_presidio_spans(text: str) -> list[tuple[str, int, int]]:
                 if not (len(digits) == 12 and verhoeff_checksum_valid(digits)):
                     continue
             found.append((label, m.start(), m.end()))
+    return found
 
-    # Presidio NER
+
+def _ner_spans(text: str, results) -> list[tuple[str, int, int]]:
+    """Presidio results above the confidence threshold, minus known
+    SDK / library names mistaken for people or places."""
+    found: list[tuple[str, int, int]] = []
+    for r in results:
+        if r.score < 0.7:
+            continue
+        matched = text[r.start:r.end].strip().lower()
+        # For PERSON entities, reject known SDK / library names so they
+        # are not flagged as name PII.
+        if r.entity_type == "PERSON" and matched in _PERSON_FALSE_POSITIVES:
+            continue
+        # For LOCATION entities, reject SDK names that spaCy tags as
+        # GPE (geopolitical entity) — e.g. capitalised "Mixpanel".
+        if r.entity_type == "LOCATION" and matched in _LOCATION_FALSE_POSITIVES:
+            continue
+        found.append((r.entity_type, r.start, r.end))
+    return found
+
+
+def scan_text_with_presidio_spans(text: str) -> list[tuple[str, int, int]]:
+    """
+    Same detection as scan_text_with_presidio(), but returns
+    (entity_type, start, end) so the caller can check WHERE in a line of
+    code an entity was found (the code scanner only accepts PERSON /
+    LOCATION hits inside a name-like string literal).
+    """
+    return scan_lines_with_presidio_spans([text])[0]
+
+
+# The only Presidio entity types the code scanner uses (code_scanner.
+# PRESIDIO_MAP). Asking for these alone skips ~20 recognizers (IBAN, crypto,
+# URL, IP, dates, US/UK/AU IDs…) whose results were discarded anyway.
+NER_ENTITIES = ["PERSON", "LOCATION", "PHONE_NUMBER", "EMAIL_ADDRESS",
+                "IN_AADHAAR", "IN_PAN", "MEDICAL_LICENSE"]
+
+
+def scan_lines_with_presidio_spans(
+    texts: list[str],
+    ner_mask: list[bool] | None = None,
+) -> list[list[tuple[str, int, int]]]:
+    """
+    Batched form of scan_text_with_presidio_spans(): one result list per
+    input text, identical to calling it text by text.
+
+    The code scanner calls this ONCE per file with every line that needs
+    NER. Presidio's BatchAnalyzerEngine runs spaCy over all of them in one
+    nlp.pipe() pass instead of one pipeline call per line — on the first 300
+    files of ohcnetwork/care (16k lines) this was ~4.6x faster, with
+    identical results, and per-line calls had pushed large scans past the
+    worker's 10-minute limit. Falls back to per-line analysis if batching is
+    unavailable (older Presidio, or a test double).
+
+    ner_mask: optional per-text flags; Presidio (the expensive part) runs
+    only on texts flagged True. The India regexes always run.
+    """
+    found = [_india_spans(t) for t in texts]
     analyzer = get_analyzer()
-    if analyzer:
+    idx = [i for i in range(len(texts)) if ner_mask is None or ner_mask[i]]
+    if not analyzer or not idx:
+        return found
+    sub = [texts[i] for i in idx]
+    try:
+        from presidio_analyzer import BatchAnalyzerEngine
+        batch = BatchAnalyzerEngine(analyzer_engine=analyzer).analyze_iterator(
+            sub, language="en", entities=NER_ENTITIES)
+    except Exception:
+        batch = None
+    for j, i in enumerate(idx):
+        text = texts[i]
         try:
-            results = analyzer.analyze(text=text, language="en")
-            for r in results:
-                if r.score < 0.7:
-                    continue
-                # For PERSON entities, reject known SDK / library names so they
-                # are not flagged as name PII.
-                if r.entity_type == "PERSON":
-                    matched = text[r.start:r.end].strip().lower()
-                    if matched in _PERSON_FALSE_POSITIVES:
-                        continue
-                # For LOCATION entities, reject SDK names that spaCy tags as
-                # GPE (geopolitical entity) — e.g. capitalised "Mixpanel".
-                if r.entity_type == "LOCATION":
-                    matched = text[r.start:r.end].strip().lower()
-                    if matched in _LOCATION_FALSE_POSITIVES:
-                        continue
-                found.append((r.entity_type, r.start, r.end))
+            results = (batch[j] if batch is not None
+                       else analyzer.analyze(text=text, language="en", entities=NER_ENTITIES))
         except Exception as e:
             print(f"[presidio] Analysis error: {e}")
-
+            continue
+        found[i].extend(_ner_spans(text, results))
     return found

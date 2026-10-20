@@ -3,7 +3,7 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")  # explicit path
 
 import asyncio
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +47,25 @@ def _iso_utc(dt):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
+# A scan still "queued"/"running" this long after creation can no longer
+# finish: the worker's hard limit is 10 minutes, so it was killed or no
+# worker is consuming the queue. Report it as failed instead of letting the
+# frontend poll forever.
+STALE_SCAN_AFTER = timedelta(minutes=15)
+
+
+def _expire_if_stale(scan, db) -> None:
+    if (scan.status in ("queued", "running") and scan.created_at is not None
+            and datetime.utcnow() - scan.created_at > STALE_SCAN_AFTER):
+        scan.status = "failed"
+        scan.error_message = (
+            "The scan did not finish within 15 minutes: the worker hit its time "
+            "limit or no worker is running. Start the scan again; large "
+            "repositories are scanned up to the time limit and reported as partial."
+        )
+        db.commit()
+
 
 @app.on_event("startup")
 def startup():
@@ -173,6 +192,8 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
 @app.get("/scans")
 def get_all_scans(db: Session = Depends(get_db)):
     scans = db.query(Scan).order_by(Scan.created_at.desc()).all()
+    for s in scans:
+        _expire_if_stale(s, db)
     return [{
         "id":               s.id,
         "repo_url":         s.repo_url,
@@ -189,6 +210,7 @@ def get_scan_status(scan_id: int, db: Session = Depends(get_db)):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    _expire_if_stale(scan, db)
     return {
         "scan_id":  scan_id,
         "status":   scan.status,
@@ -276,6 +298,8 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
         "violations_count": scan.violations_count or 0,
         "gaps_count":       scan.gaps_count or 0,
         "gaps_detected": scan_gap_categories(scan, findings),
+        # e.g. "Partial scan: 250 of 1014 source files were scanned (…)"
+        "warning":       scan.error_message if scan.status == "complete" else None,
         "compliance": compliance,
         "violations": [
             {

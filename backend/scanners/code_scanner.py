@@ -32,10 +32,15 @@ Additional:
 
 import ast
 import concurrent.futures
+import io
+import os
 import re
+import tarfile
+
+import requests
 from github import Github
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
-from scanners.presidio_scanner import scan_text_with_presidio_spans, verhoeff_checksum_valid
+from scanners.presidio_scanner import scan_lines_with_presidio_spans, verhoeff_checksum_valid
 from scanners.sinks import canonical_sink, sink_kind
 
 # Bare schema / field-declaration lines (Django ORM `field = models.XField(...)`,
@@ -181,6 +186,30 @@ def _string_spans(line: str, lang: str) -> list[tuple[int, int]]:
 # On a line of code, a PERSON / LOCATION hit is only kept when it sits
 # inside a string literal and looks like a proper name.
 _NAME_LIKE_RE = re.compile(r"^[A-Z][a-z]+(?:[ .'\-]+[A-Z][a-z]+)*$")
+
+
+_NAME_LIKE_TOKEN_RE = re.compile(r"[A-Z][a-z]+")
+
+
+def _needs_ner(code_part: str, lang: str) -> bool:
+    """
+    Could Presidio report anything on this line that the scanner would KEEP?
+    Running its spaCy pipeline is by far the most expensive step of a scan,
+    so lines where no accepted result is possible are skipped. This changes
+    no output:
+      - PERSON / LOCATION are only kept inside a name-like string literal
+        (_plausible_ner_span), so the line needs a string with a
+        capitalised word;
+      - EMAIL_ADDRESS needs '@';
+      - PHONE_NUMBER, IN_AADHAAR and MEDICAL_LICENSE need a run of digits
+        (5+ digits on the line is a deliberately loose bound);
+      - IN_PAN is only kept when PAN_VALUE_RE matches.
+    """
+    if '@' in code_part or sum(ch.isdigit() for ch in code_part) >= 5:
+        return True
+    if PAN_VALUE_RE.search(code_part):
+        return True
+    return any(_NAME_LIKE_TOKEN_RE.search(code_part[s:e]) for s, e in _string_spans(code_part, lang))
 
 
 def _plausible_ner_span(line: str, start: int, end: int, lang: str) -> bool:
@@ -912,6 +941,7 @@ def _js_taint_analysis(
 def _scan_single_file(
     repo,
     file_obj,
+    raise_errors: bool = False,
 ) -> tuple[list, dict]:
     """
     Scan one file from the git tree.
@@ -950,6 +980,9 @@ def _scan_single_file(
                        else _js_call_sinks(source_text) if is_js else None)
         # JS/TS block comments  /* ... */  and  /** ... */
         _in_block_comment = False
+
+        # Lines that need Pass 2 (NER); analysed in ONE batch after the loop
+        _pass2_pending: list[tuple[int, str, str, str | None]] = []
 
         def _add(source, line_num, raw, field, cat, sens, sink):
             file_findings.append(DataFlowObject(
@@ -1019,28 +1052,37 @@ def _scan_single_file(
                 _add("code_scanner", line_num, line, category.value, category,
                      SENSITIVITY_MAP.get(category, Sensitivity.UNKNOWN), line_sink)
 
-            # ── Pass 2: Presidio NER + India regex ────────────────────
+            # ── Pass 2: Presidio NER + India regex (queued) ───────────
             # Skipped for bare field/schema declarations (no literal content
             # for NER to analyze — see _BARE_FIELD_DECL_RE above).
             if not categories and len(code_stripped) > 10 and not _BARE_FIELD_DECL_RE.match(code_part):
-                seen_p2: set[PIICategory] = set()
-                for hit, h_start, h_end in sorted(scan_text_with_presidio_spans(code_part)):
-                    if hit not in PRESIDIO_MAP:
-                        continue
-                    cat, sens = PRESIDIO_MAP[hit]
-                    if cat in seen_p2:
-                        continue
-                    if hit in ("PERSON", "LOCATION") and not _plausible_ner_span(
-                            code_part, h_start, h_end, 'py' if is_py else 'js'):
-                        continue
-                    # Value-level validation: the same checks as Pass 1,
-                    # so Pass 2 can never re-admit what Pass 1 rejected.
-                    if cat == PIICategory.AADHAAR and not _aadhaar_value_valid(code_part):
-                        continue
-                    if cat == PIICategory.PAN and not _pan_value_valid(code_part):
-                        continue
-                    seen_p2.add(cat)
-                    _add("presidio_scanner", line_num, line, hit.lower(), cat, sens, line_sink)
+                _pass2_pending.append((line_num, line, code_part, line_sink))
+
+        # ── Pass 2: one batched Presidio call for the whole file ──────
+        _lang = 'py' if is_py else 'js'
+        _p2_results = scan_lines_with_presidio_spans(
+            [cp for _, _, cp, _ in _pass2_pending],
+            ner_mask=[_needs_ner(cp, _lang) for _, _, cp, _ in _pass2_pending],
+        )
+        for (line_num, line, code_part, line_sink), hits in zip(_pass2_pending, _p2_results):
+            seen_p2: set[PIICategory] = set()
+            for hit, h_start, h_end in sorted(hits):
+                if hit not in PRESIDIO_MAP:
+                    continue
+                cat, sens = PRESIDIO_MAP[hit]
+                if cat in seen_p2:
+                    continue
+                if hit in ("PERSON", "LOCATION") and not _plausible_ner_span(
+                        code_part, h_start, h_end, _lang):
+                    continue
+                # Value-level validation: the same checks as Pass 1,
+                # so Pass 2 can never re-admit what Pass 1 rejected.
+                if cat == PIICategory.AADHAAR and not _aadhaar_value_valid(code_part):
+                    continue
+                if cat == PIICategory.PAN and not _pan_value_valid(code_part):
+                    continue
+                seen_p2.add(cat)
+                _add("presidio_scanner", line_num, line, hit.lower(), cat, sens, line_sink)
 
         # ── AST taint analysis ────────────────────────────────────────
         taint_results: list[dict] = []
@@ -1083,6 +1125,8 @@ def _scan_single_file(
             file_usage_map.setdefault(cat, set()).update(file_module_types)
 
     except Exception as e:
+        if raise_errors:      # scan_github_repo counts it in coverage["failed"]
+            raise
         print(f"[scanner] skipped {file_obj.path}: {e}")
 
     return file_findings, file_usage_map
@@ -1090,55 +1134,208 @@ def _scan_single_file(
 
 # ── Main scanner ──────────────────────────────────────────────────────────────
 
+# Per-file GitHub API fallback (used only if the tarball download fails):
+# one request per file, so it stays capped.
+MAX_API_FILES = 300
+MAX_FILES = MAX_API_FILES          # older name
+# Whole-repository tarball: one request for everything.
+MAX_TARBALL_FILES = 20000
+MAX_TARBALL_BYTES = 500 * 1024 * 1024
+MAX_SOURCE_FILE_BYTES = 1024 * 1024   # larger "source" files are generated/bundled
+_SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "__pycache__", ".git",
+              "site-packages", "bower_components", ".venv", "venv", "coverage", ".next"}
+_SKIP_SUFFIXES = (".min.js", ".bundle.js", ".d.ts")
+
+
+class _LocalSources:
+    """Stands in for a PyGithub repo in _scan_single_file: get_contents()
+    serves files already downloaded in the tarball."""
+    def __init__(self, files: dict[str, bytes]): self._files = files
+
+    def get_contents(self, path):
+        return _LocalContent(self._files[path])
+
+
+class _LocalContent:
+    def __init__(self, data: bytes): self.decoded_content = data
+
+
+class _LocalFile:
+    type = "blob"
+    def __init__(self, path: str): self.path = path
+
+
+def _fetch_sources_tarball(repo) -> dict[str, bytes] | None:
+    """
+    Download the repository's default branch as ONE tarball and return
+    {path → bytes} for every source file worth scanning (vendored, minified,
+    generated and oversized files skipped). Nothing is written to disk.
+
+    Fetching file by file costs one API request each (PyGithub also spaces
+    requests 0.25 s apart), which is what forced the old 300-file cap.
+    Returns None on any failure so the caller can fall back to the API.
+    """
+    try:
+        url = repo.get_archive_link("tarball", ref=repo.default_branch)
+        resp = requests.get(url, stream=True, timeout=60)
+        resp.raise_for_status()
+        buf, total = io.BytesIO(), 0
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            total += len(chunk)
+            if total > MAX_TARBALL_BYTES:
+                print(f"[scanner] tarball larger than {MAX_TARBALL_BYTES >> 20} MB; using the API")
+                return None
+            buf.write(chunk)
+        buf.seek(0)
+        sources: dict[str, bytes] = {}
+        with tarfile.open(fileobj=buf, mode="r:*") as tar:
+            for member in tar:
+                if not member.isfile() or member.name.startswith('/'):
+                    continue
+                parts = member.name.split('/')[1:]          # drop "owner-repo-sha/"
+                if not parts or any(p in ('', '.', '..') for p in parts):
+                    continue
+                path = '/'.join(parts)
+                if (not path.endswith(SCAN_EXTS) or path.endswith(_SKIP_SUFFIXES)
+                        or any(p in _SKIP_DIRS for p in parts[:-1])
+                        or member.size > MAX_SOURCE_FILE_BYTES):
+                    continue
+                fh = tar.extractfile(member)
+                if fh is not None:
+                    sources[path] = fh.read()
+        print(f"[scanner] tarball: {total / 1e6:.1f} MB, {len(sources)} source files")
+        return sources
+    except Exception as e:
+        print(f"[scanner] tarball download failed ({e}); falling back to per-file API")
+        return None
+
+
+# PyGithub's default retry (GithubRetry) SLEEPS until the rate limit resets
+# — up to an hour — when GitHub answers "rate limit exceeded". Inside a
+# Celery task with a 10-minute hard limit that is indistinguishable from a
+# hang. Retry only transient server errors; rate limits are checked up front.
+try:
+    from urllib3.util.retry import Retry as _Retry
+    _GITHUB_RETRY = _Retry(total=3, backoff_factor=1,
+                           status_forcelist=(500, 502, 503, 504), allowed_methods=None)
+except Exception:  # pragma: no cover
+    _GITHUB_RETRY = 3
+
+
+def coverage_note(coverage: dict) -> str | None:
+    """Human-readable note when not every source file was scanned."""
+    total, scanned = coverage["total_source_files"], coverage["scanned"]
+    if scanned >= total:
+        return None
+    reasons = []
+    if coverage["selected"] < total:
+        reasons.append(f"the {coverage.get('file_limit', MAX_API_FILES)}-file limit")
+    if coverage["skipped_time"]:
+        reasons.append(f"the time limit ({coverage['skipped_time']} files not reached)")
+    if coverage["failed"]:
+        reasons.append(f"{coverage['failed']} files that could not be fetched or parsed")
+    return (f"Partial scan: {scanned} of {total} source files were scanned "
+            f"({'; '.join(reasons)}). Findings cover only the scanned files.")
+
+
 def scan_github_repo(
     repo_url: str,
     github_token: str,
-) -> tuple[list[DataFlowObject], dict[PIICategory, set[str]]]:
+    deadline: float | None = None,
+) -> tuple[list[DataFlowObject], dict[PIICategory, set[str]], dict]:
     """
     Scan a GitHub repository for PII.
+
+    deadline : time.monotonic() value after which files not yet started are
+               skipped (the scan then returns what it has, instead of being
+               killed by Celery's hard time limit with nothing saved).
 
     Returns
     -------
     findings  : list[DataFlowObject]  — all PII occurrences (pass 1 + pass 2 + taint)
     usage_map : dict[PIICategory, set[str]]  — how each PII category is used
                 (e.g. {PIICategory.EMAIL → {'analytics', 'notification'}})
+    coverage  : {"total_source_files", "selected", "scanned", "skipped_time",
+                 "failed"} — see coverage_note()
     """
+    import time
+
     findings: list[DataFlowObject] = []
     # usage_map accumulates module types per PII category across the whole repo
     usage_map: dict[PIICategory, set[str]] = {}
 
     repo_name = repo_url.rstrip('/').split('github.com/')[-1]
-    g = Github(github_token)
+    g = Github(github_token or None, retry=_GITHUB_RETRY)
     repo = g.get_repo(repo_name)
-    tree = repo.get_git_tree(sha="HEAD", recursive=True).tree
 
-    target_files = [
-        f for f in tree
-        if f.type == "blob" and f.path.endswith(SCAN_EXTS)
-    ]
-    target_files = target_files[:300]
-    print(f"[scanner] {len(target_files)} files to scan in {repo_name}")
+    sources = _fetch_sources_tarball(repo)
+    if sources is not None:
+        # Whole repository from one download; scanning is CPU-bound now, so
+        # a few threads suffice (more only contend for the GIL).
+        all_files = [_LocalFile(p) for p in sorted(sources)]
+        file_limit = MAX_TARBALL_FILES
+        reader = _LocalSources(sources)
+        max_workers = min(8, os.cpu_count() or 4)
+    else:
+        tree = repo.get_git_tree(sha="HEAD", recursive=True).tree
+        all_files = [
+            f for f in tree
+            if f.type == "blob" and f.path.endswith(SCAN_EXTS)
+        ]
+        file_limit = MAX_API_FILES
+        reader = repo
+        max_workers = 16
+    target_files = all_files[:file_limit]
+    print(f"[scanner] {len(target_files)} of {len(all_files)} source files to scan in {repo_name}")
+
+    if sources is None:
+        # Each file costs one API request. Fail fast with a clear message
+        # rather than starting a scan that will stall on the rate limit.
+        try:
+            core = g.get_rate_limit().core
+            remaining, reset = core.remaining, core.reset
+        except Exception:
+            remaining, reset = None, None
+        if remaining is not None and remaining < len(target_files):
+            raise ValueError(
+                f"GitHub API rate limit too low: {remaining} requests left (resets at "
+                f"{reset} UTC) but this scan needs about {len(target_files)}. "
+                + ("Provide a GitHub personal access token (5,000 requests/hour)."
+                   if not github_token else "Wait for the reset and try again.")
+            )
+
+    coverage = {"total_source_files": len(all_files), "selected": len(target_files),
+                "scanned": 0, "skipped_time": 0, "failed": 0}
+    if file_limit != MAX_API_FILES:
+        coverage["file_limit"] = file_limit
+
+    def _scan_or_skip(file_obj):
+        if deadline is not None and time.monotonic() > deadline:
+            return None
+        return _scan_single_file(reader, file_obj, raise_errors=True)
 
     # ── Parallel file scanning via ThreadPoolExecutor ─────────────────────
-    # Each file is fetched from GitHub (I/O-bound) and scanned (CPU-bound)
-    # concurrently.  PyGitHub is blocking/thread-safe for reads, so
-    # ThreadPoolExecutor is the right primitive (no native async support).
-    max_workers = min(40, len(target_files) or 1)  # bumped: I/O-bound GitHub fetches benefit from more threads
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_file = {
-            pool.submit(_scan_single_file, repo, f): f
+            pool.submit(_scan_or_skip, f): f
             for f in target_files
         }
         for future in concurrent.futures.as_completed(future_to_file):
             file_obj = future_to_file[future]
             try:
-                file_findings, file_usage_map = future.result()
+                result = future.result()
+                if result is None:
+                    coverage["skipped_time"] += 1
+                    continue
+                file_findings, file_usage_map = result
+                coverage["scanned"] += 1
                 findings.extend(file_findings)
                 for cat, mods in file_usage_map.items():
                     usage_map.setdefault(cat, set()).update(mods)
             except Exception as exc:
+                coverage["failed"] += 1
                 print(f"[scanner] skipped {file_obj.path}: {exc}")
 
-    print(f"[scanner] Done — {len(findings)} PII findings")
+    print(f"[scanner] Done — {len(findings)} PII findings; coverage {coverage}")
     print(f"[scanner] usage_map: { {k.value: v for k, v in usage_map.items()} }")
-    return findings, usage_map
+    return findings, usage_map, coverage

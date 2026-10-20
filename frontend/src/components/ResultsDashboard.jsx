@@ -129,6 +129,13 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
 
   return (
     <div className="animate-in">
+      {/* ── Partial-coverage warning (large repos: file cap / time limit) ── */}
+      {result?.warning && (
+        <div className="card card-pad mb-24" role="status"
+             style={{ background: '#fffbeb', border: '1px solid #f59e0b', color: '#92400e', fontSize: 13.5 }}>
+          ⚠️ {result.warning}
+        </div>
+      )}
       {/* ── Metric strip ── */}
       <div className="metrics-row mb-24">
         <div className="metric-card">

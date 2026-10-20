@@ -9,6 +9,12 @@ from celery import Celery
 # local dev).  REDIS_URL can be overridden in .env or docker-compose environment.
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
+# Time the code scan may use before it stops starting new files. Leaves
+# room under the 540 s soft limit for the policy models, the rule engine
+# and saving results, so a large repository returns a partial (and
+# labelled) result instead of being killed at the 600 s hard limit.
+CODE_SCAN_BUDGET_S = 420
+
 celery_app = Celery(
     "privacypilot",
     broker=REDIS_URL,
@@ -47,8 +53,9 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
     # Imported here (not at module top) so the worker process can import this
     # module at startup without triggering the full scanner import chain.
     import json
+    import time as _time
     from database import SessionLocal, Scan, Finding, Violation
-    from scanners.code_scanner import scan_github_repo
+    from scanners.code_scanner import scan_github_repo, coverage_note
     from scanners.policy_parser import parse_privacy_policy
     from dpdp.rule_engine import run_dpdp_rules
     from scoring import calculate_compliance_score
@@ -68,12 +75,20 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
         # ── Steps 1+2: Code scan and policy fetch — run IN PARALLEL ─────────
         # These two are fully independent: kick both off in a thread pool and
         # join them.  Total time = max(scan_time, policy_time) instead of sum.
+        # Not a `with` block: on an error (incl. Celery's SoftTimeLimitExceeded)
+        # `with` would wait for the still-running scan threads, the except
+        # below would never run, and the hard limit would kill the worker
+        # leaving the scan stuck at "running".
         import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
-            _code_fut   = _pool.submit(scan_github_repo, repo_url, token)
+        _deadline = _time.monotonic() + CODE_SCAN_BUDGET_S
+        _pool = _cf.ThreadPoolExecutor(max_workers=2)
+        try:
+            _code_fut   = _pool.submit(scan_github_repo, repo_url, token, _deadline)
             _policy_fut = _pool.submit(parse_privacy_policy, policy_url, token)
-            code_findings, usage_map                                       = _code_fut.result()
+            code_findings, usage_map, coverage                             = _code_fut.result()
             policy_claims, purpose_map, vagueness_warnings, disclosed_sdks = _policy_fut.result()
+        finally:
+            _pool.shutdown(wait=False, cancel_futures=True)
 
         print(f"[task] Scan {scan_id} — {len(code_findings)} code findings")
         print(f"[task] Scan {scan_id} — {len(policy_claims)} policy claims")
@@ -106,6 +121,9 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
         scan.gap_categories   = json.dumps(sorted(c.value for c in gap_categories))
         scan.violations_count = len(violations)
         scan.status           = "complete"
+        # Partial-coverage note (None when every source file was scanned);
+        # shown to the user as a warning on a completed scan.
+        scan.error_message    = coverage_note(coverage)
 
         for f in code_findings[:200]:
             db.add(Finding(
@@ -145,6 +163,7 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
             "violations_count": len(violations),
             "compliance_score": compliance.get("score"),
             "gaps_count":       len(gap_categories),
+            "coverage":         coverage,
         }
 
     except Exception as exc:

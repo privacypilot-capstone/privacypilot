@@ -32,6 +32,12 @@ docker compose up               # backend, worker, Postgres, Redis
 cd frontend && npm install && npm run dev
 ```
 
+## Large repositories
+
+The whole repository is downloaded as one tarball (one API request) and every source file is scanned; vendored, minified, generated (`*.min.js`, `node_modules/`, `dist/` …) and >1 MB files are skipped. Only if the tarball download fails does the scanner fall back to fetching files one by one through the API, capped at 300 files (`MAX_API_FILES`), and then it refuses to start if the GitHub rate limit can't cover it. Presidio NER (the expensive step) runs once per file in a batch, only on lines where a kept result is possible, and only for the entity types used. Full `ohcnetwork/care` (1014 files): about 45 s.
+
+The code scan stops starting new files after 7 minutes (`CODE_SCAN_BUDGET_S` in `tasks.py`) so it always finishes inside the worker's 10-minute limit; a partial result carries a warning such as "Partial scan: 900 of 1014 source files were scanned", shown on the dashboard. Scans still "queued"/"running" after 15 minutes are reported as failed.
+
 ## Tests
 
 ```bash

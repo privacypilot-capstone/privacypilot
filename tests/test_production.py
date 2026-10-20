@@ -779,7 +779,7 @@ def test_B8_negated_clause_contributes_no_purpose():
 
 class _FakeAnalyzer:
     def __init__(self, target, entity): self.target, self.entity = target, entity
-    def analyze(self, text, language):
+    def analyze(self, text, language, **kw):
         i = text.find(self.target)
         return [] if i < 0 else [_NS(entity_type=self.entity, start=i,
                                      end=i + len(self.target), score=0.9)]
@@ -972,3 +972,148 @@ def test_C3_stated_analytics_purpose_covers_analytics_module():
                        usage_map={P.EMAIL: {"analytics"}},
                        purpose_map={P.EMAIL: {"analytics"}})
     assert v == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Large-repository scans (ohcnetwork/care hit Celery's 600 s hard limit)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── L1: Presidio runs once per file (batched), same results as per line ──────
+
+def test_L1_batched_presidio_matches_per_line(monkeypatch):
+    monkeypatch.setattr(ps, "get_analyzer", lambda: _FakeAnalyzer("Ravi Kumar", "PERSON"))
+    texts = ['owner = "Ravi Kumar"', "x = compute_total(a, b)", 'ref = "2345 6789 0124"']
+    batched = ps.scan_lines_with_presidio_spans(texts)
+    assert batched == [ps.scan_text_with_presidio_spans(t) for t in texts]
+    assert ("PERSON", 9, 19) in batched[0]
+
+
+# ── L2–L4: scan_github_repo — rate limit, time budget, coverage ───────────────
+
+class _GhFile:
+    def __init__(self, path, text): self.path, self.type, self.text = path, "blob", text
+
+
+class _GhRepo:
+    def __init__(self, files): self.files = {f.path: f for f in files}
+    def get_git_tree(self, sha, recursive): return _NS(tree=list(self.files.values()))
+    def get_contents(self, path): return _Content(self.files[path].text)
+
+
+class _Gh:
+    remaining = 5000
+    repo = None
+    def __init__(self, *a, **kw): _Gh.kwargs = kw
+    def get_rate_limit(self):
+        return _NS(core=_NS(remaining=_Gh.remaining, reset=_dt(2026, 10, 20, 7, 0)))
+    def get_repo(self, name): return _Gh.repo
+
+
+def _fake_github(monkeypatch, n_files=3, remaining=5000):
+    files = [_GhFile(f"app/m{i}.py", "email = request.form['email']\n") for i in range(n_files)]
+    _Gh.repo, _Gh.remaining = _GhRepo(files), remaining
+    monkeypatch.setattr(cs, "Github", _Gh)
+
+
+def test_L2_rate_limit_too_low_fails_fast_with_clear_message(monkeypatch):
+    _fake_github(monkeypatch, n_files=3, remaining=2)
+    with pytest.raises(ValueError, match="rate limit"):
+        cs.scan_github_repo("https://github.com/o/r", "")
+
+
+def test_L2_github_client_does_not_sleep_on_rate_limit(monkeypatch):
+    _fake_github(monkeypatch)
+    cs.scan_github_repo("https://github.com/o/r", "tok")
+    from github import GithubRetry
+    assert "retry" in _Gh.kwargs and not isinstance(_Gh.kwargs["retry"], GithubRetry)
+
+
+def test_L3_deadline_skips_unstarted_files_and_reports_coverage(monkeypatch):
+    import time
+    _fake_github(monkeypatch, n_files=3)
+    findings, usage, cov = cs.scan_github_repo("https://github.com/o/r", "t",
+                                               deadline=time.monotonic() - 1)
+    assert findings == [] and cov["scanned"] == 0 and cov["skipped_time"] == 3
+
+
+def test_L4_full_scan_reports_coverage(monkeypatch):
+    _fake_github(monkeypatch, n_files=3)
+    findings, usage, cov = cs.scan_github_repo("https://github.com/o/r", "t")
+    assert cov == {"total_source_files": 3, "selected": 3, "scanned": 3,
+                   "skipped_time": 0, "failed": 0}
+    assert {f.pii_category for f in findings} == {P.EMAIL}
+
+
+def test_L4_coverage_note_text():
+    note = cs.coverage_note({"total_source_files": 1014, "selected": 300, "scanned": 250,
+                             "skipped_time": 50, "failed": 0})
+    assert "250 of 1014" in note and "time limit" in note and "300-file limit" in note
+    assert cs.coverage_note({"total_source_files": 3, "selected": 3, "scanned": 3,
+                             "skipped_time": 0, "failed": 0}) is None
+
+
+# ── L5: NER only runs on lines whose result could be accepted ────────────────
+
+@pytest.mark.parametrize("line,needed", [
+    ('owner = "Ravi Kumar"', True),          # name-like string → PERSON possible
+    ('send(to="ops@example.com")', True),    # '@' → EMAIL_ADDRESS
+    ("call(9876543210)", True),              # digit run → phone / Aadhaar
+    ('pan = "ABCPE1234F"', True),            # PAN shape
+    ("total = compute_total(a, b)", False),  # nothing NER could report
+    ('status = "active"', False),            # lower-case string: no name
+    ("print(Student.objects.count())", False),  # capitalised, but not in a string
+])
+def test_L5_ner_prefilter(line, needed):
+    assert cs._needs_ner(line, "py") is needed
+
+
+class _RecordingAnalyzer:
+    def __init__(self): self.calls = []
+    def analyze(self, text, language, **kw):
+        self.calls.append((text, kw.get("entities")))
+        return []
+
+
+def test_L5_presidio_only_asked_for_used_entities_on_masked_lines(monkeypatch):
+    rec = _RecordingAnalyzer()
+    monkeypatch.setattr(ps, "get_analyzer", lambda: rec)
+    ps.scan_lines_with_presidio_spans(["a = 1", 'b = "Ravi"'], ner_mask=[False, True])
+    assert [t for t, _ in rec.calls] == ['b = "Ravi"']
+    assert set(rec.calls[0][1]) == set(ps.NER_ENTITIES)
+
+
+# ── L6: the whole repository is fetched as one tarball ────────────────────────
+
+def _tarball(files: dict) -> bytes:
+    import io, tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(f"o-r-abc123/{path}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_L6_tarball_sources_skip_vendored_minified_and_non_source(monkeypatch):
+    blob = _tarball({"app/a.py": "x = 1\n", "web/app.js": "y()\n",
+                     "node_modules/lib/x.js": "z()\n", "web/vendor.min.js": "q()\n",
+                     "README.md": "# hi\n", "../evil.py": "bad\n"})
+    monkeypatch.setattr(cs.requests, "get", lambda url, **kw: _NS(
+        status_code=200, iter_content=lambda chunk_size: iter([blob]), raise_for_status=lambda: None,
+        headers={}))
+    repo = _NS(get_archive_link=lambda fmt, ref=None: "https://codeload.example/x.tar.gz",
+               default_branch="main")
+    assert set(cs._fetch_sources_tarball(repo)) == {"app/a.py", "web/app.js"}
+
+
+def test_L6_full_repo_scan_uses_the_tarball_and_has_no_file_cap(monkeypatch):
+    many = {f"app/m{i}.py": "email = request.form['email']\n" for i in range(cs.MAX_API_FILES + 5)}
+    monkeypatch.setattr(cs, "_fetch_sources_tarball",
+                        lambda repo: {p: t.encode() for p, t in many.items()})
+    _fake_github(monkeypatch, n_files=0)
+    _Gh.repo.get_contents = lambda path: (_ for _ in ()).throw(AssertionError("per-file API call"))
+    findings, _, cov = cs.scan_github_repo("https://github.com/o/r", "t")
+    assert cov["scanned"] == cov["total_source_files"] == len(many)
+    assert cs.coverage_note(cov) is None
