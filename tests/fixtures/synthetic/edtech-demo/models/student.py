@@ -1,27 +1,34 @@
-# Student data model for LearnIndia platform
-# Synthetic edtech app for PrivacyPilot evaluation
-# PLANTED VIOLATIONS: V1 (date_of_birth), V2 (location)
+"""Student data model for LearnIndia."""
 
 from django.db import models
 
+
+# Benchmark negative control:
+# References to Aadhaar, PAN, and Firebase in this comment are
+# examples for privacy-review testing only. They are not model
+# fields and do not represent collection or transmission.
+
+
 class Student(models.Model):
-    # Basic info
-    full_name    = models.CharField(max_length=200)
-    email        = models.EmailField(unique=True)
+    # Basic information
+    full_name = models.CharField(max_length=200)
+    email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15)
 
-    # PLANTED V1 — Student DOB collected, not in policy
+    # Intentionally retained benchmark case: date of birth is
+    # collected in code but is not listed in the privacy policy.
     date_of_birth = models.DateField()
 
-    # PLANTED V2 — Location for attendance tracking, not in policy
-    latitude  = models.DecimalField(max_digits=9, decimal_places=6)
+    # Intentionally retained benchmark case: location fields are
+    # collected in code but are not listed in the privacy policy.
+    latitude = models.DecimalField(max_digits=9, decimal_places=6)
     longitude = models.DecimalField(max_digits=9, decimal_places=6)
-    address   = models.TextField()
+    address = models.TextField()
 
-    # Academic info
+    # Academic information
     course_enrolled = models.CharField(max_length=200)
-    progress        = models.IntegerField(default=0)
-    created_at      = models.DateTimeField(auto_now_add=True)
+    progress = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.full_name} - {self.course_enrolled}"

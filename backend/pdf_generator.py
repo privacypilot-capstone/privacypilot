@@ -8,7 +8,7 @@ import io
 import re
 from xml.sax.saxutils import escape as _xml_escape
 
-from database import scan_gap_categories
+from database import scan_gap_categories, violation_locations, location_label
 
 
 def _x(value) -> str:
@@ -34,7 +34,9 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     SEVERITY_COLORS = {'critical': RED, 'high': ORANGE, 'medium': AMBER, 'low': GREEN}
     score_color = HexColor(compliance.get('color', '#333333'))
 
-    title_style = ParagraphStyle('title', fontSize=20, textColor=white,
+    # leading > fontSize: with ReportLab's default leading (12) large text
+    # overlapped the line below it.
+    title_style = ParagraphStyle('title', fontSize=20, leading=24, textColor=white,
         fontName='Helvetica-Bold', alignment=TA_CENTER, spaceAfter=4)
     sub_style   = ParagraphStyle('sub',   fontSize=10, textColor=HexColor('#aaaaaa'),
         fontName='Helvetica', alignment=TA_CENTER)
@@ -82,9 +84,9 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     critical  = compliance.get('critical_count', 0)
     high      = compliance.get('high_count', 0)
 
-    score_style  = ParagraphStyle('sc', fontSize=40, textColor=score_color,
+    score_style  = ParagraphStyle('sc', fontSize=40, leading=46, textColor=score_color,
         fontName='Helvetica-Bold', alignment=TA_CENTER)
-    rating_style = ParagraphStyle('rt', fontSize=14, textColor=score_color,
+    rating_style = ParagraphStyle('rt', fontSize=14, leading=18, textColor=score_color,
         fontName='Helvetica-Bold', alignment=TA_CENTER, spaceAfter=2)
     detail_style = ParagraphStyle('dt', fontSize=9,  textColor=HexColor('#666666'),
         fontName='Helvetica', alignment=TA_CENTER)
@@ -189,6 +191,17 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     story.append(Spacer(1, 2*mm))
 
+    # Text that may contain long unbroken tokens (paths, minified code) wraps
+    # anywhere (CJK word wrap), so it never runs out of its column.
+    loc_style  = ParagraphStyle('loc', fontSize=7, fontName='Courier', leading=9,
+        textColor=HexColor('#333333'), leftIndent=4*mm, wordWrap='CJK')
+    cell_style = ParagraphStyle('cell', fontSize=6.5, fontName='Helvetica', leading=8,
+        wordWrap='CJK')
+    code_style = ParagraphStyle('cellcode', fontSize=6.5, fontName='Courier', leading=8,
+        wordWrap='CJK')
+    vbody_style = ParagraphStyle('vbody', parent=small_style, leftIndent=2*mm)
+    vfix_style  = ParagraphStyle('vfix', parent=fix_style, leftIndent=2*mm)
+
     for v in violations:
         sev_color = SEVERITY_COLORS.get(v.severity, ORANGE)
         sev_label = _x((v.severity or '').upper())
@@ -209,55 +222,70 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
             ('VALIGN',        (0,0), (-1,-1), 'MIDDLE'),
         ]))
         story.append(v_header)
+        story.append(Spacer(1, 1.5*mm))
 
-        v_body = Table([[
-            Paragraph(
-                f'<b>PII Type:</b> {_x(v.pii_category)}<br/>'
-                f'<b>Evidence:</b> {_x(v.evidence)}<br/>'
-                f'<font color="#2d6a4f"><b>Fix:</b> {_x(v.recommendation)}</font>',
-                small_style
-            )
-        ]], colWidths=[W])
-        v_body.setStyle(TableStyle([
-            ('BOX',           (0,0), (-1,-1), 0.5, HexColor('#dddddd')),
-            ('TOPPADDING',    (0,0), (-1,-1), 6),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-            ('LEFTPADDING',   (0,0), (-1,-1), 8),
-        ]))
-        story.append(v_body)
-        story.append(Spacer(1, 3*mm))
+        # Plain paragraphs (not one table cell), so a violation with a long
+        # evidence text or hundreds of locations flows across pages instead
+        # of failing with "flowable too large".
+        recipient = getattr(v, 'recipient', None)
+        story.append(Paragraph(f'<b>PII Type:</b> {_x(v.pii_category)}'
+                               + (f'  ·  <b>Recipient:</b> {_x(recipient)}' if recipient else ''),
+                               vbody_style))
+        story.append(Paragraph(f'<b>Evidence:</b> {_x(v.evidence)}', vbody_style))
+        locs = violation_locations(v)
+        if locs:
+            story.append(Paragraph(f'<b>Code locations ({len(locs)}):</b>', vbody_style))
+            for i, l in enumerate(locs, 1):
+                story.append(Paragraph(f'{i}. {_x(location_label(l))}', loc_style))
+        story.append(Paragraph(f'<b>Fix:</b> {_x(v.recommendation)}', vfix_style))
+        story.append(HRFlowable(width=W, thickness=0.5, color=HexColor('#dddddd'),
+                                spaceBefore=2*mm, spaceAfter=3*mm))
 
-    # ── Sample Findings ───────────────────────────────────────────────────────
+    # ── All Findings ──────────────────────────────────────────────────────────
     story.append(Spacer(1, 3*mm))
-    story.append(Paragraph('Sample Code Findings (first 10)', h2_style))
+    story.append(Paragraph(f'All Code Findings ({len(findings)})', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     story.append(Spacer(1, 2*mm))
 
-    findings_data = [['PII Type', 'Sensitivity', 'File', 'Line', 'Detected By']]
-    for f in findings[:10]:
-        findings_data.append([
-            f.pii_category or '',
-            f.sensitivity  or '',
-            (f.file_path   or '')[-40:],
-            str(f.line_number or ''),
-            f.source or '',
-        ])
-
-    findings_table = Table(findings_data,
-        colWidths=[25*mm, 22*mm, 70*mm, 14*mm, 39*mm])
-    findings_table.setStyle(TableStyle([
+    origin_label = {'first_party': 'Your code', 'third_party': 'Third-party',
+                    'generated': 'Generated'}
+    header = ['#', 'PII Type', 'File : line', 'Origin', 'Sent to', 'Code', 'Detected by']
+    col_w = [9*mm, 15*mm, 48*mm, 15*mm, 18*mm, 43*mm, 22*mm]
+    tstyle = TableStyle([
         ('BACKGROUND',    (0,0), (-1,0),  NAVY),
         ('TEXTCOLOR',     (0,0), (-1,0),  white),
         ('FONTNAME',      (0,0), (-1,0),  'Helvetica-Bold'),
-        ('FONTSIZE',      (0,0), (-1,-1), 8),
+        ('FONTSIZE',      (0,0), (-1,-1), 6.5),
         ('FONTNAME',      (0,1), (-1,-1), 'Helvetica'),
         ('ROWBACKGROUNDS',(0,1), (-1,-1), [white, HexColor('#f9f9f9')]),
-        ('GRID',          (0,0), (-1,-1), 0.5, HexColor('#dddddd')),
-        ('TOPPADDING',    (0,0), (-1,-1), 5),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
-        ('LEFTPADDING',   (0,0), (-1,-1), 6),
-    ]))
-    story.append(findings_table)
+        ('GRID',          (0,0), (-1,-1), 0.4, HexColor('#dddddd')),
+        ('VALIGN',        (0,0), (-1,-1), 'TOP'),
+        ('TOPPADDING',    (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('LEFTPADDING',   (0,0), (-1,-1), 3),
+        ('RIGHTPADDING',  (0,0), (-1,-1), 3),
+    ])
+    rows = []
+    for i, f in enumerate(findings, 1):
+        rows.append([
+            str(i),
+            f.pii_category or '',
+            Paragraph(f'{_x(f.file_path or "N/A")} : {_x(f.line_number or "")}', cell_style),
+            origin_label.get(f.origin or 'first_party', f.origin or ''),
+            Paragraph(_x(f.third_party_sdk or '—'), cell_style),
+            Paragraph(_x(f.raw_text or ''), code_style),
+            Paragraph(_x(f.source or ''), cell_style),
+        ])
+    if not rows:
+        story.append(Paragraph('No findings.', body_style))
+    # Several moderate tables rather than one huge one: ReportLab splits a
+    # table across pages by re-laying it out, which gets slow for very long
+    # tables. Every table repeats the header row on each page.
+    CHUNK = 200
+    for k in range(0, len(rows), CHUNK):
+        t = Table([header] + rows[k:k + CHUNK], colWidths=col_w, repeatRows=1)
+        t.setStyle(tstyle)
+        story.append(t)
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     story.append(Spacer(1, 8*mm))

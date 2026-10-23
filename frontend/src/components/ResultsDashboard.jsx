@@ -30,6 +30,16 @@ function scoreRating(score) {
   return 'Critical Risk';
 }
 
+// Same wording as the backend's location labels (database.location_label).
+function locationLabel(l) {
+  let s = `${l.file || 'unknown file'} line ${l.line}`;
+  if (l.sinks && l.sinks.length)     s += ` (${l.sinks.join(', ')})`;
+  if (l.modules && l.modules.length) s += ` (module: ${l.modules.join(', ')})`;
+  if (l.origin === 'third_party')    s += ' [third-party code]';
+  if (l.origin === 'generated')      s += ' [generated code]';
+  return s;
+}
+
 function ViolationCard({ v }) {
   const [open, setOpen] = useState(false);
   return (
@@ -52,10 +62,24 @@ function ViolationCard({ v }) {
       </div>
       {open && (
         <div className="v-card-body animate-in">
+          {v.recipient && (
+            <div className="v-detail-row">
+              <div className="v-detail-label">Recipient</div>
+              <div className="v-detail-value mono">{v.recipient}</div>
+            </div>
+          )}
           <div className="v-detail-row">
             <div className="v-detail-label">Evidence</div>
             <div className="v-detail-value">{v.evidence}</div>
           </div>
+          {v.locations && v.locations.length > 0 && (
+            <div className="v-detail-row">
+              <div className="v-detail-label">Code locations ({v.locations.length})</div>
+              <ol className="v-detail-value mono" style={{ margin: 0, paddingLeft: 22, fontSize: 12, wordBreak: 'break-all' }}>
+                {v.locations.map((l, i) => <li key={i}>{locationLabel(l)}</li>)}
+              </ol>
+            </div>
+          )}
           <div className="v-detail-row">
             <div className="v-detail-label">Fix</div>
             <div className="v-detail-value fix">✅ {v.recommendation}</div>
@@ -108,7 +132,7 @@ const ORIGIN_LABEL = {
   third_party: 'Third-party',
   generated:   'Generated / built',
 };
-const PAGE_SIZE = 50;
+const PAGE_SIZES = [50, 200, 500];
 
 function sensitivityColor(s) {
   return s === 'high' ? '#ef4444' : s === 'medium' ? '#f97316' : '#22c55e';
@@ -122,6 +146,7 @@ function AllFindings({ scanId, fallback }) {
   const [search, setSearch]   = useState('');
   const [q, setQ]             = useState('');
   const [offset, setOffset]   = useState(0);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
   const [data, setData]       = useState(null);
   const [error, setError]     = useState(null);
   const [loading, setLoading] = useState(false);
@@ -134,7 +159,7 @@ function AllFindings({ scanId, fallback }) {
 
   useEffect(() => {
     if (!scanId) return;
-    const params = new URLSearchParams({ offset: String(offset), limit: String(PAGE_SIZE) });
+    const params = new URLSearchParams({ offset: String(offset), limit: String(pageSize) });
     if (filters.category)    params.set('category', filters.category);
     if (filters.origin)      params.set('origin', filters.origin);
     if (filters.transmitted) params.set('transmitted', 'true');
@@ -147,7 +172,7 @@ function AllFindings({ scanId, fallback }) {
       .catch(e => { if (!cancelled) setError(e.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [scanId, offset, filters, q]);
+  }, [scanId, offset, pageSize, filters, q]);
 
   const update = (patch) => { setFilters(f => ({ ...f, ...patch })); setOffset(0); };
 
@@ -156,7 +181,7 @@ function AllFindings({ scanId, fallback }) {
   const total = data?.total ?? items.length;
   const facets = data?.facets;
   const from = total === 0 ? 0 : offset + 1;
-  const to = Math.min(offset + PAGE_SIZE, total);
+  const to = Math.min(offset + pageSize, total);
 
   return (
     <div className="card mb-24">
@@ -170,6 +195,12 @@ function AllFindings({ scanId, fallback }) {
         <span className="section-count" style={{ marginLeft: 'auto' }}>
           {facets ? Object.values(facets.origin).reduce((a, b) => a + b, 0) : total} total
         </span>
+        {scanId && (
+          <a href={`${API}/scans/${scanId}/findings.csv`} className="btn btn-secondary btn-sm"
+             title="Every finding of this scan as a CSV file">
+            Download all (CSV)
+          </a>
+        )}
       </div>
 
       {facets && (
@@ -228,15 +259,14 @@ function AllFindings({ scanId, fallback }) {
               <tr key={f.id ?? `${f.file_path}:${f.line_number}:${f.pii_category}`}>
                 <td><span className="pii-chip">{f.pii_category}</span></td>
                 <td><span style={{ fontSize: 12, fontWeight: 600, color: sensitivityColor(f.sensitivity) }}>{f.sensitivity || '—'}</span></td>
-                <td className="mono" title={f.file_path}
-                    style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <td className="mono" style={{ maxWidth: 260, wordBreak: 'break-all' }}>
                   {f.file_path || '—'}
                 </td>
                 <td className="mono">{f.line_number || '—'}</td>
                 <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{ORIGIN_LABEL[f.origin] || ORIGIN_LABEL.first_party}</td>
                 <td className="mono" style={{ fontSize: 12 }}>{f.third_party_sdk || '—'}</td>
-                <td className="mono" title={f.raw_text}
-                    style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>
+                <td className="mono"
+                    style={{ maxWidth: 320, wordBreak: 'break-all', whiteSpace: 'pre-wrap', fontSize: 12 }}>
                   {f.raw_text}
                 </td>
                 <td><span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{f.source}</span></td>
@@ -249,13 +279,25 @@ function AllFindings({ scanId, fallback }) {
         </table>
       </div>
 
-      {data && total > PAGE_SIZE && (
-        <div className="card-body" style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end', fontSize: 12.5 }}>
+      {data && total > PAGE_SIZES[0] && (
+        <div className="card-body" style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end', fontSize: 12.5, flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            Per page
+            <select value={pageSize} aria-label="Findings per page"
+                    onChange={e => { setPageSize(Number(e.target.value)); setOffset(0); }}
+                    style={{ fontSize: 12.5, padding: '2px 6px' }}>
+              {PAGE_SIZES.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
           <span>{from}–{to} of {total}</span>
           <button className="btn btn-secondary btn-sm" disabled={offset === 0 || loading}
-                  onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>‹ Prev</button>
+                  onClick={() => setOffset(0)}>« First</button>
+          <button className="btn btn-secondary btn-sm" disabled={offset === 0 || loading}
+                  onClick={() => setOffset(Math.max(0, offset - pageSize))}>‹ Prev</button>
           <button className="btn btn-secondary btn-sm" disabled={to >= total || loading}
-                  onClick={() => setOffset(offset + PAGE_SIZE)}>Next ›</button>
+                  onClick={() => setOffset(offset + pageSize)}>Next ›</button>
+          <button className="btn btn-secondary btn-sm" disabled={to >= total || loading}
+                  onClick={() => setOffset(Math.floor((total - 1) / pageSize) * pageSize)}>Last »</button>
         </div>
       )}
     </div>
@@ -423,6 +465,12 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           <div className="section-header">
             <div className="section-title">DPDP Violations</div>
             <span className="section-count">{violations.length}</span>
+            {scanId && (
+              <a href={`${API}/scans/${scanId}/violations.csv`} className="btn btn-secondary btn-sm"
+                 title="Every violation with all its code locations, as a CSV file">
+                Download (CSV)
+              </a>
+            )}
             <div className="filter-tabs">
               {['all', 'critical', 'high', 'medium', 'low'].map(f => (
                 <button

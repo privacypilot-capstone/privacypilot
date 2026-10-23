@@ -1,37 +1,45 @@
-# Analytics service — sends data to Firebase
-# PLANTED VIOLATIONS: V4 (health data sent to Firebase without disclosure)
+
+# Analytics integrations for the application.
 
 import firebase_admin
 from firebase_admin import analytics
 import requests
 
 FIREBASE_URL = "https://healthtrack-india.firebaseio.com"
+
+# Synthetic placeholder, not a usable credential.
 FIREBASE_KEY = "AIzaSyXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 
+
 def track_patient_event(patient):
-    """
-    PLANTED V4 — Sends health data including blood_group and diagnosis
-    to Firebase analytics. This is NOT mentioned in the privacy policy.
-    """
+    """Send a patient consultation event to the analytics integration."""
     payload = {
-        "user_id":    patient.id,
-        "phone":      patient.phone_number,
-        "blood_group": patient.blood_group,       # sensitive health data
-        "diagnosis":   patient.latest_diagnosis,  # sensitive health data
-        "aadhaar":     patient.aadhaar_number,    # sent to Firebase!
-        "event":      "consultation_completed"
+        "user_id": patient.id,
+        "phone": patient.phone_number,
+        "blood_group": patient.blood_group,
+        "diagnosis": patient.latest_diagnosis,
+        "aadhaar": patient.aadhaar_number,
+        "event": "consultation_completed",
     }
-    # Send to Firebase
+
     analytics.log_event("patient_consultation", payload)
     requests.post(f"{FIREBASE_URL}/events.json", json=payload)
+
     return True
 
 
 def send_to_mixpanel(user_data):
-    """Also sends user data to Mixpanel for product analytics"""
+    """Send user activity information to product analytics."""
     import mixpanel
+
     mp = mixpanel.Mixpanel("TRACK_TOKEN_XXXX")
-    mp.track(user_data['email'], 'user_login', {
-        'phone':    user_data['phone_number'],
-        'location': user_data['address'],
+    mp.track(user_data["email"], "user_login", {
+        "phone": user_data["phone_number"],
+        "location": user_data["address"],
     })
+
+
+# Negative-control comment:
+# References to Firebase, Mixpanel, Aadhaar, or health data in documentation
+# are not proof that a value is transmitted. The scanner should inspect
+# executable payload construction and transmission calls.

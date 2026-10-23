@@ -20,11 +20,29 @@ Definitions (matching the paper's own stated methodology, para 96):
             planted violations of the same kind in one repo need two
             distinct actual detections, not one counted twice).
 
-Usage: python eval/compute_metrics.py
-Reads eval/results/all_results.json and eval/ground_truth.json (both must
-exist — see eval/ground_truth.example.json for the shape).
+Unit of comparison
+  Each reported violation is reduced to (rule, PII category, recipient) and
+  duplicates are removed, so one recipient reported twice for the same
+  category counts once. When a ground-truth entry has a "recipient", a strict
+  match also requires the same recipient (the scanner's recipient label, e.g.
+  "firebase", "segment", "maps.googleapis.com", "application logs"); a match on rule and
+  category with another recipient is PARTIAL. Vague-purpose violations are
+  reported per policy statement and list several categories, so for the
+  "vagueness" rule the category is not compared.
+
+Options
+  --contract-unverified count|ignore
+        Whether Section 8(2) "Processor Contract Unverified" items (the
+        recipient IS named in the policy; only the contract cannot be
+        checked) count as detections. Default: count. With "ignore" they
+        are dropped before matching, so they are neither TP nor FP.
+  --ground-truth PATH   (default eval/ground_truth.json)
+  --results PATH        (default eval/results/all_results.json)
+
+Usage: python eval/compute_metrics.py [--contract-unverified ignore]
 """
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -41,6 +59,7 @@ SECTION_TO_RULE = {
     "Section 8(2)":                      "rule_2_third_party",  # undisclosed + disclosed-SDK branches
     "Section 5 / Section 8(2)":          "rule_2_third_party",  # label used by scans before Oct 2026
     "Section 8(5)":                      "rule_2_third_party",  # logger-sink branch
+    "Section 8(5) / Section 8(2)":       "rule_2_third_party",  # external logging service (Sentry, Datadog, CloudWatch)
     "Section 6(1)":                      "rule_3_purpose_linkage",
     "DPDP Rules 2025, Rule 3(b)(ii)":     "vagueness",
 }
@@ -63,27 +82,57 @@ def rule_of(dpdp_section: str) -> str:
     return SECTION_TO_RULE.get(dpdp_section, f"unknown:{dpdp_section}")
 
 
+CONTRACT_UNVERIFIED_TITLE = "Processor Contract Unverified"
+
+
+def _norm(x):
+    return (x or "").strip().lower() or None
+
+
+def exact_match(gt: dict, a: dict) -> bool:
+    if a["rule"] != gt["rule"]:
+        return False
+    if gt["rule"] != "vagueness" and a["pii_category"] != gt["pii_category"]:
+        return False
+    if gt.get("recipient") and _norm(a.get("recipient")) != _norm(gt["recipient"]):
+        return False
+    return True
+
+
+def actual_violations(scan_result: dict, contract_unverified: str = "count") -> list[dict]:
+    """Reported violations as (rule, category, recipient), duplicates removed."""
+    out, seen = [], set()
+    for v in scan_result.get("violations", []):
+        if (contract_unverified == "ignore"
+                and CONTRACT_UNVERIFIED_TITLE in (v.get("section_title") or "")):
+            continue
+        a = {"rule": rule_of(v["dpdp_section"]), "pii_category": v["pii_category"],
+             "recipient": v.get("recipient")}
+        key = (a["rule"], a["pii_category"], _norm(a["recipient"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
+
+
 def match_repo(planted: list[dict], actual: list[dict]) -> dict:
     """One-to-one matching for a single repo. Returns counts plus the
     leftover (unmatched) actual violations, which are this repo's FPs.
 
     Two passes, so the result does not depend on the order of the planted
-    list: every EXACT match (same rule + same PII category) is made first,
-    and only then are the remaining planted violations allowed a PARTIAL
-    match (same rule, other category). A single greedy pass let an earlier
+    list: every EXACT match (exact_match) is made first, and only then are
+    the remaining planted violations allowed a PARTIAL match (same rule,
+    other category or recipient). A single greedy pass let an earlier
     planted violation take, as a partial match, the detection that exactly
     matched a later one — turning a strict TP into a strict FN.
     """
-    remaining_actual = list(actual)  # each: {"rule":..., "pii_category":...}
+    remaining_actual = list(actual)  # each: {"rule", "pii_category", "recipient"}
     outcome: list[str | None] = [None] * len(planted)
 
     # Pass 1: exact matches
     for i, gt in enumerate(planted):
-        idx = next(
-            (j for j, a in enumerate(remaining_actual)
-             if a["rule"] == gt["rule"] and a["pii_category"] == gt["pii_category"]),
-            None,
-        )
+        idx = next((j for j, a in enumerate(remaining_actual) if exact_match(gt, a)), None)
         if idx is not None:
             remaining_actual.pop(idx)
             outcome[i] = "TP"
@@ -115,6 +164,15 @@ def match_repo(planted: list[dict], actual: list[dict]) -> dict:
 
 
 def main():
+    global RESULTS_FILE, GROUND_TRUTH_FILE
+    ap = argparse.ArgumentParser(description="Score PrivacyPilot scans against ground truth.")
+    ap.add_argument("--contract-unverified", choices=("count", "ignore"), default="count")
+    ap.add_argument("--ground-truth", type=Path, default=GROUND_TRUTH_FILE)
+    ap.add_argument("--results", type=Path, default=RESULTS_FILE)
+    args = ap.parse_args()
+    RESULTS_FILE, GROUND_TRUTH_FILE = args.results, args.ground_truth
+    print(f"Contract-unverified items: {args.contract_unverified}")
+
     if not RESULTS_FILE.exists():
         print(f"Missing {RESULTS_FILE} — run eval/run_eval.py first.")
         return
@@ -128,6 +186,7 @@ def main():
 
     totals = {"strict_tp": 0, "lenient_tp": 0, "fn": 0, "fp": 0}
     per_category: dict[str, dict] = {}
+    per_rule: dict[str, dict] = {}
     per_repo_report = {}
 
     for repo in ground_truth["repos"]:
@@ -139,10 +198,7 @@ def main():
                   f"all {len(planted)} planted violations count as FN for this repo.")
             actual = []
         else:
-            actual = [
-                {"rule": rule_of(v["dpdp_section"]), "pii_category": v["pii_category"]}
-                for v in scan_result.get("violations", [])
-            ]
+            actual = actual_violations(scan_result, args.contract_unverified)
 
         m = match_repo(planted, actual)
         per_repo_report[label] = m
@@ -151,6 +207,17 @@ def main():
 
         # Per-PII-category rollup (Table V), driven by the ground truth's
         # own categories plus any leftover-FP categories.
+        for d in m["details"]:
+            r = per_rule.setdefault(d["rule"], {"planted": 0, "strict_tp": 0, "lenient_tp": 0, "fn": 0, "fp": 0})
+            r["planted"] += 1
+            if d["outcome"] == "TP":
+                r["strict_tp"] += 1; r["lenient_tp"] += 1
+            elif d["outcome"] == "PARTIAL":
+                r["lenient_tp"] += 1; r["fn"] += 1
+            else:
+                r["fn"] += 1
+        for fp_item in m["leftover_actual_fp"]:
+            per_rule.setdefault(fp_item["rule"], {"planted": 0, "strict_tp": 0, "lenient_tp": 0, "fn": 0, "fp": 0})["fp"] += 1
         for d in m["details"]:
             cat = d["pii_category"]
             per_category.setdefault(cat, {"strict_tp": 0, "lenient_tp": 0, "fn": 0, "fp": 0})
@@ -198,6 +265,14 @@ def main():
               f"fn={m['fn']} fp={m['fp']}")
 
     print("\n" + "=" * 70)
+    print("PER-RULE (strict)")
+    print("=" * 70)
+    for rule, c in sorted(per_rule.items()):
+        recall, precision, f1 = prf(c["strict_tp"], c["fn"], c["fp"])
+        print(f"  {rule:24s} planted={c['planted']}  tp={c['strict_tp']}  fn={c['fn']}  "
+              f"fp={c['fp']}  recall={recall:.1%}  precision={precision:.1%}  f1={f1:.1%}")
+
+    print("\n" + "=" * 70)
     print("PER-PII-CATEGORY (Table V)")
     print("=" * 70)
     for cat, c in sorted(per_category.items()):
@@ -209,6 +284,8 @@ def main():
         "totals": totals,
         "per_repo": per_repo_report,
         "per_category": per_category,
+        "per_rule": per_rule,
+        "contract_unverified": args.contract_unverified,
     }
     (HERE / "metrics_output.json").write_text(json.dumps(out, indent=2, default=str))
     print(f"\nFull breakdown written to {HERE / 'metrics_output.json'}")

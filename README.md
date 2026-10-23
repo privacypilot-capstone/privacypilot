@@ -8,9 +8,14 @@ DPDP Act 2023 compliance engine. It scans a GitHub repository's source code and 
 | --- | --- | --- |
 | Notice Gap — PII in code but not in the policy | Section 5 / Section 6(1) | `backend/dpdp/rule_engine.py` |
 | Third-Party Transmission — PII sent to an SDK, HTTP call or queue | Section 8(2) | `rule_engine.py`, `scanners/sinks.py` |
-| PII in Logger Output | Section 8(5) | `rule_engine.py`, `scanners/sinks.py` |
+| PII in Logger Output (print, logging, console) | Section 8(5) | `rule_engine.py`, `scanners/sinks.py` |
+| PII Sent to External Logging Service (Sentry, Datadog, CloudWatch) | Section 8(5) / Section 8(2) | `rule_engine.py`, `scanners/sinks.py` |
 | Purpose–PII Linkage — code use not covered by a stated purpose | Section 6(1) | `rule_engine.py`, `scanners/code_scanner.py`, `scanners/policy_parser.py` |
 | Vague Purpose Statement | DPDP Rules 2025, Rule 3(b)(ii) | `scanners/policy_parser.py`, `rule_engine.py` |
+
+Each violation is reported once per check and data category (third-party and logging checks: once per category and recipient; all local log calls are one recipient, "application logs"; vague purposes: once per policy statement). It lists every code location it covers — in the evidence text and as `locations` in the API — and a call spanning several lines is one location. One piece of code can still raise several violations when it breaches several provisions.
+
+Nothing is truncated in the outputs: the results page lists every violation with all its code locations and pages through every finding (50/200/500 per page); the HTML and PDF reports (`/report/{id}`, `?format=pdf`) list every violation, location and finding; and `/scans/{id}/violations.csv` and `/scans/{id}/findings.csv` export them all. Stored code lines are cut only above 1,000 characters (minified code), marked with "…".
 
 Severity tiers (Aadhaar, PAN, health, financial and biometric data are treated as "critical") are a design choice of this project; the Act itself does not define a sensitive-data class. This tool is a research prototype and does not give legal advice.
 
@@ -95,6 +100,8 @@ pytest -q tests
 
 `tests/test_production.py` imports and runs the real backend modules; each test is tagged with the audit defect it guards. Add a test there for every new feature or fix.
 
-`tests/test_synthetic_repos.py` runs the whole pipeline offline on snapshots of the five synthetic evaluation repos (`tests/fixtures/synthetic`, commits in `SOURCES.txt`) and checks consent gaps and every Section 8(2) / 8(5) finding exactly against the planted violations. Rule 3 and vagueness are model-based and are not asserted there.
+`tests/test_synthetic_repos.py` runs the whole pipeline offline on snapshots of the five synthetic evaluation repos (`tests/fixtures/synthetic`, commits in `SOURCES.txt`) and checks consent gaps and every Section 8(2) / 8(5) finding (category and recipient) exactly against the reviewed ground truth `eval/privacy_pilot_ground_truth_reviewed_v5.csv`; the test lists the documented exceptions. Rule 3 and vagueness are model-based and are not asserted there.
+
+Scoring an evaluation run: `python eval/compute_metrics.py [--contract-unverified count|ignore] [--ground-truth PATH]`. Reported violations are compared as (rule, category, recipient) with duplicates removed; a vague-purpose violation is one per policy statement, so its category is not compared; `--contract-unverified ignore` leaves out Section 8(2) items where the policy already names the recipient. The script also prints per-rule results.
 
 `prototypes/` holds the early feasibility scripts used to check whether each planned strategy would work. They carry their own copies of the logic, are not part of the test suite, and are kept for reference only.

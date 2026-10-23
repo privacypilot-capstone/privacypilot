@@ -180,7 +180,9 @@ def test_D4_js_http_sinks_raise_rule_2a():
            'fetch("/api/save", { body: JSON.stringify({ c }) });\n')
     f, _ = scan("svc/a.js", src)
     sinks = {x.third_party_sdk for x in f if x.source == "taint_analysis"}
-    assert {"axios.post", "fetch"} <= sinks
+    # The recipient is named by the URL's host when it is a literal; a
+    # relative URL cannot be resolved, so the call keeps its HTTP label.
+    assert {"x.io", "fetch"} <= sinks
     assert "Section 8(2)" in sections(run_dpdp_rules(f, f, set()))
 
 
@@ -889,7 +891,8 @@ def test_B9_government_endpoint_is_not_a_third_party_processor():
 def test_B9_ordinary_endpoint_is_still_a_sink():
     src = ('import requests\nAPI_URL = "https://api.example.com/verify"\n\n'
            'def v(aadhaar_number):\n    return requests.post(API_URL, json={"uid": aadhaar_number})\n')
-    assert (P.AADHAAR, "requests.post") in _sinks(scan("svc/a.py", src)[0])
+    # The recipient is named by the URL's host.
+    assert (P.AADHAAR, "api.example.com") in _sinks(scan("svc/a.py", src)[0])
 
 
 def test_B2_local_module_named_analytics_is_not_an_sdk():
@@ -1536,3 +1539,282 @@ def test_S15_long_minified_line_is_analysed_in_windows(monkeypatch):
     out = ps.scan_lines_with_presidio_spans([text], ner_mask=[True])[0]
     assert ("EMAIL_ADDRESS", at, at + 19) in out
     assert len([o for o in out if o[0] == "EMAIL_ADDRESS"]) == 1    # overlap: not doubled
+
+
+# ── M1–M4: one recipient once, GET transmissions, one vague statement once,
+#           metrics unit (23 Oct 2026) ──────────────────────────────────────
+
+def test_M1_recipient_is_named_from_the_url_host():
+    from scanners.sinks import recipient_for_url, sink_kind
+    assert recipient_for_url("https://healthtrack-india.firebaseio.com/events.json") == "firebase"
+    assert recipient_for_url("https://api.segment.io/v1/track") == "segment"
+    assert recipient_for_url("https://maps.googleapis.com/maps/api/geocode/json") == "maps.googleapis.com"
+    assert recipient_for_url("/api/save") is None and recipient_for_url(None) is None
+    assert sink_kind("maps.googleapis.com") == "http" and sink_kind("firebase") == "sdk"
+
+
+def test_M1_sdk_and_http_to_same_service_are_one_recipient():
+    src = ('import requests\nfrom firebase_admin import analytics\n'
+           'FIREBASE_URL = "https://demo.firebaseio.com"\n\n'
+           'def t(patient):\n'
+           '    payload = {"diagnosis": patient.latest_diagnosis}\n'
+           '    analytics.log_event("x", payload)\n'
+           '    requests.post(f"{FIREBASE_URL}/events.json", json=payload)\n')
+    f, _ = scan("svc/a.py", src)
+    v = [x for x in run_dpdp_rules(f, [], set()) if x.dpdp_section == "Section 8(2)"]
+    assert [(x.pii_category, x.recipient) for x in v] == [("health", "firebase")]
+
+
+def test_M1_js_url_constant_names_the_recipient():
+    pytest.importorskip("tree_sitter_javascript")
+    src = ('const SEGMENT_URL = "https://api.segment.io/v1/track";\n'
+           'const email = req.body.email;\n'
+           'axios.post(SEGMENT_URL, { email });\n'
+           'fetch(`${SEGMENT_URL}?x=1`, { body: JSON.stringify({ email }) });\n'
+           'axios.post("https://uidai.gov.in/verify", { aadhaarNumber });\n')
+    f, _ = scan("svc/a.js", src)
+    assert {x.third_party_sdk for x in f if x.third_party_sdk} == {"segment"}
+
+
+def test_M2_get_request_with_coordinates_is_a_transmission():
+    src = ('import requests\n\n'
+           'def reverse_geocode(lat, lng):\n'
+           '    url = "https://maps.googleapis.com/maps/api/geocode/json"\n'
+           '    return requests.get(url, params={\n'
+           '        "latlng": f"{lat},{lng}",\n'
+           '    })\n')
+    f, _ = scan("svc/geo.py", src)
+    assert (P.LOCATION, "maps.googleapis.com") in _sinks(f)
+
+
+def test_M3_one_vague_statement_is_one_violation():
+    s = "We use your information to provide and improve our services."
+    w = [{"pii_category": c, "margin": 0.02, "sentence": s, "top_label": "analytics"}
+         for c in ("email", "name", "phone")]
+    w.append({"pii_category": "email", "margin": 0.05, "sentence": "Other: for business purposes.",
+              "top_label": "marketing"})
+    v = [x for x in run_dpdp_rules([], [], set(), vagueness_warnings=w)
+         if x.dpdp_section.startswith("DPDP Rules")]
+    assert len(v) == 2
+    assert sorted(x.pii_category for x in v) == ["email", "email, name, phone"]
+
+
+def _metrics():
+    import importlib.util, pathlib
+    path = pathlib.Path(__file__).resolve().parents[1] / "eval" / "compute_metrics.py"
+    spec = importlib.util.spec_from_file_location("compute_metrics", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+def test_M4_metrics_dedupe_recipient_vagueness_and_contract_option():
+    cm = _metrics()
+    scan_result = {"violations": [
+        {"dpdp_section": "Section 8(2)", "section_title": "Third-Party Transmission — Undisclosed Data Processor",
+         "pii_category": "health", "recipient": "firebase"},
+        {"dpdp_section": "Section 8(2)", "section_title": "Third-Party Transmission — Undisclosed Data Processor",
+         "pii_category": "health", "recipient": "firebase"},                      # duplicate
+        {"dpdp_section": "Section 8(2)", "section_title": "Third-Party Transmission — Processor Contract Unverified",
+         "pii_category": "phone", "recipient": "twilio"},
+        {"dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)", "section_title": "Vague Purpose Statement",
+         "pii_category": "email, name, phone", "recipient": None},
+    ]}
+    counted = cm.actual_violations(scan_result, "count")
+    ignored = cm.actual_violations(scan_result, "ignore")
+    assert len(counted) == 3 and len(ignored) == 2
+    gt = [{"rule": "rule_2_third_party", "pii_category": "health", "recipient": "firebase"},
+          {"rule": "vagueness", "pii_category": "n/a"}]
+    m = cm.match_repo(gt, ignored)
+    assert (m["strict_tp"], m["fn"], m["fp"]) == (2, 0, 0)
+    # wrong recipient: only a lenient (PARTIAL) match
+    m = cm.match_repo([{"rule": "rule_2_third_party", "pii_category": "health",
+                        "recipient": "twilio"}], ignored)
+    assert (m["strict_tp"], m["lenient_tp"]) == (0, 1)
+
+
+# ── N: one violation per issue, every location, nothing hidden ──────────────
+
+def _f(cat, sdk=None, path="app.py", line=1, modules=None, origin=None, source="t"):
+    f = finding(cat, sdk, "x", path, line)
+    f.module_types = modules
+    f.origin = origin
+    f.source = source
+    return f
+
+
+def test_N1_every_location_is_listed_and_one_line_counts_once():
+    fs = [_f(P.PHONE, "mixpanel", "a.py", 3),
+          _f(P.PHONE, "mixpanel", "a.py", 3, source="taint_analysis"),   # same line, 2nd pass
+          _f(P.PHONE, "mixpanel", "b.py", 9),
+          _f(P.PHONE, "mixpanel", "vendor/x.js", 4, origin="third_party")]
+    v = [x for x in run_dpdp_rules(fs, [], set()) if x.dpdp_section == "Section 8(2)"]
+    assert len(v) == 1
+    v = v[0]
+    assert [(l["file"], l["line"]) for l in v.locations] == [("a.py", 3), ("b.py", 9), ("vendor/x.js", 4)]
+    assert "3 locations" in v.evidence
+    for loc in ("a.py line 3", "b.py line 9", "vendor/x.js line 4 [third-party code]"):
+        assert loc in v.evidence
+    assert v.to_dict()["locations"] == v.locations
+
+
+def test_N2_local_log_calls_are_one_recipient():
+    fs = [_f(P.EMAIL, "print", "a.py", 1), _f(P.EMAIL, "logger", "b.py", 2),
+          _f(P.EMAIL, "console.log", "c.js", 3)]
+    v = run_dpdp_rules(fs, [], set())
+    assert len(v) == 1 and v[0].dpdp_section == "Section 8(5)"
+    assert v[0].recipient == "application logs"
+    assert "a.py line 1 (print)" in v[0].evidence and "c.js line 3 (console.log)" in v[0].evidence
+
+
+def test_N3_external_logging_service_reports_8_5_and_8_2_in_one_violation():
+    v = run_dpdp_rules([_f(P.AADHAAR, "sentry", "a.py", 5)], [], set())
+    assert len(v) == 1
+    v = v[0]
+    assert v.dpdp_section == "Section 8(5) / Section 8(2)"
+    assert v.recipient == "sentry" and v.severity == "critical"
+    assert "does not name 'sentry'" in v.evidence and "Section 8(2)" in v.evidence
+    # named in the policy: still both provisions, but the evidence says so
+    d = run_dpdp_rules([_f(P.AADHAAR, "sentry", "a.py", 5)], [], set(),
+                       disclosed_sdks={P.AADHAAR: {"sentry"}})[0]
+    assert "names 'sentry' as a recipient of this data" in d.evidence
+    # a local logger and Sentry for the same data are two recipients
+    both = run_dpdp_rules([_f(P.AADHAAR, "sentry"), _f(P.AADHAAR, "print", line=2)], [], set())
+    assert sorted(x.recipient for x in both) == ["application logs", "sentry"]
+
+
+def test_N3_policy_naming_sentry_is_read_as_disclosure():
+    from scanners.sinks import sdks_named_in
+    assert {"sentry", "datadog"} <= sdks_named_in("errors are reported to sentry and datadog.")
+
+
+def test_N4_notice_gap_states_the_purposes_rule_3_would_have_reported():
+    fs = [_f(P.PHONE, None, "services/analytics.py", 4, modules=["analytics"]),
+          _f(P.PHONE, None, "api/views.py", 8, modules=["api"])]
+    v = run_dpdp_rules(fs, [], {P.PHONE}, usage_map={P.PHONE: {"analytics", "api"}},
+                       purpose_map={})
+    assert [x.dpdp_section for x in v] == ["Section 5 / Section 6(1)"]   # no separate Rule 3
+    e = v[0].evidence
+    assert "services/analytics.py line 4 (module: analytics)" in e and "api/views.py line 8 (module: api)" in e
+    assert "analytics, service_delivery" in e
+    assert "analytics, service_delivery" in v[0].recommendation
+
+
+def test_N5_purpose_violation_lists_only_locations_in_the_uncovered_modules():
+    fs = [_f(P.EMAIL, None, f"svc/a{i}.py", i, modules=["analytics"]) for i in range(1, 6)]
+    fs.append(_f(P.EMAIL, None, "auth/login.py", 7, modules=["authentication"]))
+    v = run_dpdp_rules(fs, fs, set(), usage_map={P.EMAIL: {"analytics", "authentication"}},
+                       purpose_map={P.EMAIL: {"service_delivery"}})
+    r3 = [x for x in v if x.dpdp_section == "Section 6(1)"]
+    assert len(r3) == 1
+    assert len(r3[0].locations) == 5                    # all five, not the first three
+    assert "auth/login.py" not in r3[0].evidence        # its purpose IS stated
+
+
+def test_N6_scanner_records_module_types_on_findings():
+    f, _ = scan("services/analytics.py", "def track(user):\n    mixpanel.track('x', user.email)\n")
+    assert f and all(x.module_types and "analytics" in x.module_types for x in f)
+
+
+def test_N7_metrics_map_the_combined_logging_section():
+    cm = _metrics()
+    assert cm.rule_of("Section 8(5) / Section 8(2)") == "rule_2_third_party"
+
+
+def test_N8_one_multi_line_call_is_one_location():
+    src = ("import mixpanel\n"
+           "def f(u):\n"
+           "    mp = mixpanel.Mixpanel('t')\n"
+           "    mp.track(u['email'], 'login', {\n"
+           "        'phone': u['phone_number'],\n"
+           "    })\n")
+    f, _ = scan("svc/a.py", src)
+    phone = [x for x in f if x.pii_category == P.PHONE and x.third_party_sdk == "mixpanel"]
+    assert phone and {x.call_line for x in phone} == {4}
+    v = [x for x in run_dpdp_rules(f, [], set()) if x.dpdp_section == "Section 8(2)"
+         and x.pii_category == "phone"]
+    assert len(v) == 1 and [(l["file"], l["line"]) for l in v[0].locations] == [("svc/a.py", 4)]
+
+
+# ── R: the UI API, reports and exports list everything ───────────────────────
+
+def _stored_scan(mem_db, n_findings=250, n_locs=40):
+    import database
+    db = mem_db()
+    scan = database.Scan(repo_url="https://github.com/o/r", policy_url="p", status="complete",
+                         findings_count=n_findings, violations_count=1, gaps_count=0,
+                         gap_categories="[]")
+    db.add(scan); db.commit()
+    locs = [{"file": f"src/m{i}.py", "line": i} for i in range(1, n_locs + 1)]
+    db.add(database.Violation(scan_id=scan.id, dpdp_section="Section 8(2)",
+                              section_title="Third-Party Transmission — Undisclosed Data Processor",
+                              severity="high", pii_category="email", recipient="mixpanel",
+                              evidence=f"'email' data is transmitted to 'mixpanel' at {n_locs} locations",
+                              recommendation="r", locations=_json.dumps(locs)))
+    for i in range(n_findings):
+        db.add(database.Finding(scan_id=scan.id, source="code_scanner", file_path=f"src/f{i}.py",
+                                line_number=i + 1, raw_text=f"track(email_{i})", field_name="email",
+                                pii_category="email", sensitivity="personal", origin="first_party"))
+    db.commit()
+    sid = scan.id
+    db.close()
+    return sid
+
+
+def _client(mem_db):
+    from fastapi.testclient import TestClient
+    import main, database
+    def _get_db():
+        db = mem_db()
+        try:
+            yield db
+        finally:
+            db.close()
+    main.app.dependency_overrides[database.get_db] = _get_db
+    return TestClient(main.app), main
+
+
+def test_R1_reports_list_every_finding_and_every_location(mem_db, monkeypatch):
+    sid = _stored_scan(mem_db)
+    client, main = _client(mem_db)
+    monkeypatch.setattr(main, "generate_report_summary",
+                        lambda d: (_ for _ in ()).throw(main.LLMNotConfiguredError()))
+    try:
+        html = client.get(f"/report/{sid}").text
+        assert "All Code Findings (250)" in html
+        assert html.count("track(email_") == 250                  # not the first 10
+        assert "Code locations (40)" in html and "src/m40.py line 40" in html
+        pdf = client.get(f"/report/{sid}?format=pdf")
+        assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+        res = client.get(f"/scans/{sid}/result").json()
+        assert len(res["violations"][0]["locations"]) == 40
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_R2_csv_exports_have_every_row(mem_db):
+    import csv, io
+    sid = _stored_scan(mem_db, n_findings=2500)
+    client, main = _client(mem_db)
+    try:
+        rows = list(csv.reader(io.StringIO(client.get(f"/scans/{sid}/findings.csv").text.lstrip("﻿"))))
+        assert rows[0][0] == "pii_category" and len(rows) == 2501
+        v = list(csv.DictReader(io.StringIO(client.get(f"/scans/{sid}/violations.csv").text.lstrip("﻿"))))
+        assert len(v) == 1 and v[0]["location_count"] == "40"
+        assert v[0]["locations"].count(";") == 39
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_R3_long_code_lines_and_vague_sentences_are_kept():
+    long_line = "x = {'email': user.email, " + ", ".join(f"'k{i}': {i}" for i in range(60)) + "}"
+    assert 200 < len(long_line) < cs.RAW_TEXT_MAX
+    f, _ = scan("a.py", long_line + "\n")
+    assert f and f[0].raw_text == long_line.strip()
+    assert cs._snippet("y" * 5000).endswith("…") and len(cs._snippet("y" * 5000)) == cs.RAW_TEXT_MAX + 1
+
+
+def test_R4_many_locations_are_counted_in_the_evidence_and_all_listed():
+    fs = [_f(P.EMAIL, "mixpanel", f"s/{i}.py", i) for i in range(1, 11)]
+    v = [x for x in run_dpdp_rules(fs, [], set()) if x.dpdp_section == "Section 8(2)"][0]
+    assert "10 locations (all listed under Code locations)" in v.evidence
+    assert len(v.locations) == 10

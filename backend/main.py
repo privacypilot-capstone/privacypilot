@@ -481,6 +481,11 @@ def get_task_status(task_id: str):
 
 
 
+def _violation_locations(v) -> list:
+    from database import violation_locations
+    return violation_locations(v)
+
+
 @app.get("/scans/{scan_id}/violations")
 def get_violations(scan_id: int, db: Session = Depends(get_db)):
     violations = db.query(Violation).filter(
@@ -493,6 +498,8 @@ def get_violations(scan_id: int, db: Session = Depends(get_db)):
         "pii_category":   v.pii_category,
         "evidence":       v.evidence,
         "recommendation": v.recommendation,
+        "recipient":      getattr(v, "recipient", None),
+        "locations":      _violation_locations(v),
     } for v in violations]
 
 
@@ -546,6 +553,8 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
                 "pii_category":   v.pii_category,
                 "evidence":       v.evidence,
                 "recommendation": v.recommendation,
+                "recipient":      getattr(v, "recipient", None),
+                "locations":      _violation_locations(v),
             }
             for v in violations
         ],
@@ -663,7 +672,9 @@ def get_report(
         raise HTTPException(status_code=404, detail="Scan not found")
 
     violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
-    findings   = _load_findings(db, scan, limit=10)
+    # EVERY finding: the report lists them all (the LLM narrative still gets
+    # a sample of 10, as context only).
+    findings   = _load_findings(db, scan)
 
     class FakeV:
         def __init__(self, s):
@@ -696,6 +707,8 @@ def get_report(
                         "pii_category":   v.pii_category,
                         "evidence":       v.evidence,
                         "recommendation": v.recommendation,
+                        "recipient":      getattr(v, "recipient", None),
+                        "locations":      _violation_locations(v),
                     }
                     for v in violations
                 ],
@@ -722,8 +735,6 @@ def get_report(
             narrative = None
 
     # ── Build and return the report ───────────────────────────────────────────
-    html = generate_report_html(scan, violations, findings, compliance, narrative=narrative)
-
     if format == "pdf":
         try:
             from pdf_generator import generate_pdf
@@ -738,7 +749,81 @@ def get_report(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"PDF error: {e}")
 
+    html = generate_report_html(scan, violations, findings, compliance, narrative=narrative)
     return HTMLResponse(content=html)
+
+
+# ── Full exports (CSV) ───────────────────────────────────────────────────────
+# Every violation / every finding of a scan, unpaged, for spreadsheets and
+# evaluation. Finding rows are streamed so a scan with tens of thousands of
+# findings is not built in memory first.
+
+def _csv_response(rows, header, filename):
+    import csv, io
+    from fastapi.responses import StreamingResponse
+
+    def gen():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        buf.write("\ufeff")                   # BOM: Excel opens UTF-8 correctly
+        w.writerow(header)
+        for r in rows:
+            w.writerow(r)
+            if buf.tell() > 64 * 1024:
+                yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+        yield buf.getvalue()
+
+    return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.get("/scans/{scan_id}/violations.csv")
+def export_violations_csv(scan_id: int, db: Session = Depends(get_db)):
+    """Every violation, one row each; locations as 'file:line' joined by '; '."""
+    if not db.query(Scan).filter(Scan.id == scan_id).first():
+        raise HTTPException(status_code=404, detail="Scan not found")
+    vs = db.query(Violation).filter(Violation.scan_id == scan_id).order_by(Violation.id).all()
+
+    def rows():
+        for v in vs:
+            locs = _violation_locations(v)
+            yield [v.dpdp_section, v.section_title, v.severity, v.pii_category,
+                   getattr(v, "recipient", None) or "", len(locs),
+                   "; ".join(f"{l.get('file')}:{l.get('line')}" for l in locs),
+                   v.evidence, v.recommendation]
+
+    return _csv_response(rows(), ["dpdp_section", "title", "severity", "pii_category",
+                                  "recipient", "location_count", "locations",
+                                  "evidence", "recommendation"],
+                         f"violations_{scan_id}.csv")
+
+
+@app.get("/scans/{scan_id}/findings.csv")
+def export_findings_csv(scan_id: int, db: Session = Depends(get_db)):
+    """Every finding of the scan, one row each, in stored order."""
+    if not db.query(Scan).filter(Scan.id == scan_id).first():
+        raise HTTPException(status_code=404, detail="Scan not found")
+    # The rows are read while the response streams, after this request's
+    # session may already be closed, so the generator opens its own.
+    bind = db.get_bind()
+
+    def rows():
+        from sqlalchemy.orm import Session as _Session
+        own = _Session(bind=bind)
+        try:
+            q = (own.query(Finding).filter(Finding.scan_id == scan_id)
+                    .order_by(Finding.id).yield_per(2000))
+            for f in q:
+                yield [f.pii_category, f.sensitivity, f.file_path, f.line_number,
+                       f.origin or "first_party", f.third_party_sdk or "",
+                       bool(f.is_gap), f.source, f.field_name, f.raw_text]
+        finally:
+            own.close()
+
+    return _csv_response(rows(), ["pii_category", "sensitivity", "file_path", "line_number",
+                                  "origin", "sent_to", "is_gap", "detected_by",
+                                  "field_name", "code"],
+                         f"findings_{scan_id}.csv")
 
 
 # ── LLM Report Summary ────────────────────────────────────────────────────────
@@ -783,6 +868,8 @@ def get_scan_summary(scan_id: int, db: Session = Depends(get_db)):
                 "pii_category":  v.pii_category,
                 "evidence":      v.evidence,
                 "recommendation":v.recommendation,
+                "recipient":     getattr(v, "recipient", None),
+                "locations":     _violation_locations(v),
             }
             for v in violations
         ],
@@ -888,6 +975,8 @@ def send_chat_message(
                 "pii_category":  v.pii_category,
                 "evidence":      v.evidence,
                 "recommendation":v.recommendation,
+                "recipient":     getattr(v, "recipient", None),
+                "locations":     _violation_locations(v),
             }
             for v in violations
         ],

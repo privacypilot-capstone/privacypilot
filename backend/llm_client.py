@@ -43,6 +43,7 @@ _ANTHROPIC_URL  = "https://api.anthropic.com/v1/messages"
 
 _TIMEOUT        = 60          # seconds per LLM call
 _MAX_TOKENS     = 1024        # response length cap
+_MAX_LOCS       = 50          # code locations per violation given to the model
 
 # ── DPDP expert system prompt ─────────────────────────────────────────────────
 
@@ -103,6 +104,16 @@ def _scan_context_text(scan_data: dict) -> str:
             f"{v.get('section_title')}  |  PII: {v.get('pii_category')}"
         )
         lines.append(f"  Evidence      : {v.get('evidence', '')}")
+        if v.get("recipient"):
+            lines.append(f"  Recipient     : {v['recipient']}")
+        locs = v.get("locations") or []
+        if locs:
+            # Model context only (the reports list every location); capped
+            # so a violation with thousands of locations cannot crowd out
+            # the rest of the prompt.
+            shown = "; ".join(f"{l.get('file')}:{l.get('line')}" for l in locs[:_MAX_LOCS])
+            more = f" … and {len(locs) - _MAX_LOCS} more" if len(locs) > _MAX_LOCS else ""
+            lines.append(f"  Locations ({len(locs)}): {shown}{more}")
         lines.append(f"  Recommendation: {v.get('recommendation', '')}")
         lines.append("")
 

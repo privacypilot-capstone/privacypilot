@@ -13,6 +13,13 @@ a short canonical label such as "mixpanel", "requests.post", "axios.post",
 `sink_kind(label)` maps a canonical label to one of
 "sdk" | "http" | "queue" | "logger" | None.
 
+`recipient_for_url(url)` names the RECIPIENT of an HTTP call from its URL:
+a known SDK host gives that SDK's label (a POST to *.firebaseio.com is
+Firebase, to api.segment.io is Segment), any other host gives the host name
+(e.g. "maps.googleapis.com"). The scanner uses it so that one recipient is
+reported once, whether the code calls it through its SDK or over plain HTTP
+(previously "firebase" and "requests.post" were two separate recipients).
+
 Matching uses identifier boundaries instead of raw substrings, so
 "fingerprint(" / "Blueprint(" are not mistaken for print(), "user_segment"
 is not the Segment SDK, and "catalog" is not a logger.
@@ -43,6 +50,11 @@ SDK_RULES: list[tuple[re.Pattern, str]] = [
 # ── Outbound HTTP (Rule 2a) ──────────────────────────────────────────────────
 HTTP_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(_L + r'requests\s*\.\s*post\s*\(', re.I),  'requests.post'),
+    # GET requests send data too (query parameters, path segments): a
+    # geocoding call with the user's coordinates is a transmission.
+    (re.compile(_L + r'requests\s*\.\s*get\s*\(', re.I),   'requests.get'),
+    (re.compile(_L + r'httpx\s*\.\s*get\s*\(', re.I),      'httpx.get'),
+    (re.compile(_L + r'axios\s*\.\s*get\s*\(', re.I),      'axios.get'),
     (re.compile(_L + r'requests\s*\.\s*put\s*\(', re.I),   'requests.put'),
     (re.compile(_L + r'requests\s*\.\s*patch\s*\(', re.I), 'requests.patch'),
     (re.compile(_L + r'httpx\s*\.\s*post\s*\(', re.I),     'httpx.post'),
@@ -84,6 +96,9 @@ SDK_LABELS    = {lbl for _, lbl in SDK_RULES}
 HTTP_LABELS   = {lbl for _, lbl in HTTP_RULES}
 QUEUE_LABELS  = {lbl for _, lbl in QUEUE_RULES}
 LOGGER_LABELS = {lbl for _, lbl in LOGGER_RULES}
+# Loggers that SEND the data to an outside logging / monitoring service (a
+# third party processing it) rather than writing the application's own logs.
+EXTERNAL_LOGGER_LABELS = {'sentry', 'datadog', 'cloudwatch'}
 
 # Priority when several sinks share a line: a named third-party SDK first,
 # then HTTP, then queues, then loggers.
@@ -100,8 +115,57 @@ def canonical_sink(text: str | None) -> str | None:
     return None
 
 
+# ── Recipients of HTTP calls, by host ────────────────────────────────────────
+# Host (or parent domain) → SDK label. Matched on the host name only.
+HOST_SDK: dict[str, str] = {
+    'firebaseio.com':            'firebase',
+    'firebasedatabase.app':      'firebase',
+    'firebase.googleapis.com':   'firebase',
+    'firestore.googleapis.com':  'firebase',
+    'firebaselogging.googleapis.com': 'firebase',
+    'crashlytics.com':           'crashlytics',
+    'segment.io':                'segment',
+    'segment.com':               'segment',
+    'mixpanel.com':              'mixpanel',
+    'amplitude.com':             'amplitude',
+    'clevertap.com':             'clevertap',
+    'clevertap-prod.com':        'clevertap',
+    'google-analytics.com':      'analytics',
+    'twilio.com':                'twilio',
+    'sendgrid.com':              'sendgrid',
+    'sendgrid.net':              'sendgrid',
+}
+_HOST_LABEL_RE = re.compile(r'^(?=.{1,253}$)[a-z0-9-]+(?:\.[a-z0-9-]+)+$')
+
+
+def url_host(url: str | None) -> str | None:
+    """Host name of an absolute http(s) URL, lower-cased; None otherwise."""
+    if not url:
+        return None
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url.strip())
+    except ValueError:
+        return None
+    if p.scheme not in ('http', 'https') or not p.hostname:
+        return None
+    return p.hostname.lower()
+
+
+def recipient_for_url(url: str | None) -> str | None:
+    """SDK label for a known SDK host, else the host name, else None."""
+    host = url_host(url)
+    if not host:
+        return None
+    for domain, label in HOST_SDK.items():
+        if host == domain or host.endswith('.' + domain):
+            return label
+    return host
+
+
 def sink_kind(label: str | None) -> str | None:
-    """Map a canonical label to 'sdk' | 'http' | 'queue' | 'logger' | None."""
+    """Map a canonical label to 'sdk' | 'http' | 'queue' | 'logger' | None.
+    A host name produced by recipient_for_url() is an HTTP recipient."""
     if not label:
         return None
     lbl = label.lower()
@@ -116,7 +180,10 @@ def sink_kind(label: str | None) -> str | None:
     # Non-canonical label (e.g. stored by an older scanner version):
     # classify it by running the matcher over it.
     again = canonical_sink(label if '(' in label else label + '(')
-    return sink_kind(again) if again and again.lower() != lbl else None
+    if again and again.lower() != lbl:
+        return sink_kind(again)
+    # A host name from recipient_for_url() (e.g. "maps.googleapis.com").
+    return 'http' if _HOST_LABEL_RE.match(lbl) else None
 
 
 # ── Naming an SDK in privacy-policy prose (policy_parser Pass 3) ─────────────
@@ -137,6 +204,10 @@ SDK_DISCLOSURE_PATTERNS: dict[str, re.Pattern] = {
     'analytics':   re.compile(r'\b(?:google|firebase|adobe)\s+analytics\b'),
     'twilio':      re.compile(r'\btwilio\b'),
     'sendgrid':    re.compile(r'\bsendgrid\b'),
+    # external logging / monitoring services (EXTERNAL_LOGGER_LABELS)
+    'sentry':      re.compile(r'\bsentry\b'),
+    'datadog':     re.compile(r'\bdatadog\b'),
+    'cloudwatch':  re.compile(r'\bcloudwatch\b'),
 }
 
 

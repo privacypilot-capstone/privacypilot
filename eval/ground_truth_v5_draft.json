@@ -1,0 +1,312 @@
+{
+  "_readme": "Draft generated from privacy_pilot_ground_truth_reviewed_v5.csv (non-judgment positives only). Unit: one entry per (rule, PII category); for rule_2 one entry per (category, recipient); local log calls are the recipient 'application logs'. Judgment cases (DP-J*, HEALTH-J*, EDU-J1, DP-V5) are NOT included; add them only after a human decision. 'label' must match eval/repos.json. Repository commits: see the CSV. rule_2 entries carry the scanner's recipient label, so a strict match also requires the recipient (compute_metrics.py). Run with --contract-unverified ignore if 'contract unverified' items are not to be counted (COMP-N4).",
+  "repos": [
+    {
+      "label": "dpdp-synthetic-test",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "location",
+          "case_id": "DP-V9",
+          "note": "not in policy"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "biometric",
+          "case_id": "DP-V2",
+          "note": "fingerprint_hash"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "aadhaar",
+          "case_id": "DP-V10",
+          "note": "not in policy"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "health",
+          "case_id": "DP-V11",
+          "note": "diagnosis"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "DP-V1",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "DP-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "health",
+          "case_id": "DP-V6",
+          "note": "-> Firebase (requests.post)",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "DP-V7",
+          "note": "-> Segment (requests.post)",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "DP-V8",
+          "note": "-> Segment (requests.post)",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "aadhaar",
+          "case_id": "DP-V4",
+          "note": "logger, Section 8(5)",
+          "recipient": "application logs"
+        }
+      ]
+    },
+    {
+      "label": "healthtech-demo",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "aadhaar",
+          "case_id": "HEALTH-V1",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "health",
+          "case_id": "HEALTH-V2",
+          "note": "blood group"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "biometric",
+          "case_id": "HEALTH-V3",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "date_of_birth",
+          "case_id": "HEALTH-V6",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "pan",
+          "case_id": "HEALTH-V7",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "location",
+          "case_id": "HEALTH-V8",
+          "note": "GPS coordinates (element-level rubric)"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "HEALTH-V4",
+          "note": "-> Firebase",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "health",
+          "case_id": "HEALTH-V4",
+          "note": "-> Firebase",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "aadhaar",
+          "case_id": "HEALTH-V4",
+          "note": "-> Firebase",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "HEALTH-V5",
+          "note": "-> Twilio",
+          "recipient": "twilio"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "name",
+          "case_id": "HEALTH-V5",
+          "note": "-> Twilio",
+          "recipient": "twilio"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "health",
+          "case_id": "HEALTH-V10",
+          "note": "-> Twilio",
+          "recipient": "twilio"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "HEALTH-V9",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "HEALTH-V9",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "HEALTH-V9",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        }
+      ]
+    },
+    {
+      "label": "fintech-demo",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "pan",
+          "case_id": "FIN-V1",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "financial",
+          "case_id": "FIN-V2/FIN-V3",
+          "note": "bank account + IFSC (one category)"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "aadhaar",
+          "case_id": "FIN-V4",
+          "note": ""
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "FIN-V5/V6",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "pan",
+          "case_id": "FIN-V5",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "financial",
+          "case_id": "FIN-V5",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "aadhaar",
+          "case_id": "FIN-V5",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "FIN-V6",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "name",
+          "case_id": "FIN-V6",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "email",
+          "case_id": "FIN-V7",
+          "note": ""
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "phone",
+          "case_id": "FIN-V8",
+          "note": ""
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "name",
+          "case_id": "FIN-V9",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "label": "edtech-demo",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "date_of_birth",
+          "case_id": "EDU-V1",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "location",
+          "case_id": "EDU-V2",
+          "note": ""
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "name",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        }
+      ]
+    },
+    {
+      "label": "compliant-demo",
+      "violations": []
+    }
+  ]
+}

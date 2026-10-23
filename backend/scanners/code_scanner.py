@@ -40,7 +40,7 @@ import re
 
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.presidio_scanner import scan_lines_with_presidio_spans, verhoeff_checksum_valid
-from scanners.sinks import canonical_sink, sink_kind
+from scanners.sinks import canonical_sink, sink_kind, recipient_for_url, url_host
 
 # Bare schema / field-declaration lines (Django ORM `field = models.XField(...)`,
 # SQLAlchemy `col = Column(...)`, dataclass/pydantic `field: Type = Field(...)`,
@@ -75,7 +75,8 @@ PII_PATTERNS = {
     PIICategory.PAN:       r'pan_number|pan_card|pan_no|pancard',
     PIICategory.PHONE:     r'phone_number|mobile_number|contact_number|mobile_no|phone_no|phone|mobile',
     PIICategory.EMAIL:     r'email_address|user_email|email_id|email',
-    PIICategory.LOCATION:  r'latitude|longitude|location|gps|address',
+    # lat / lng / latlng: the usual short names of coordinates (latLng → lat_lng)
+    PIICategory.LOCATION:  r'latitude|longitude|latlng|lat|lng|location|gps|address',
     PIICategory.HEALTH:    r'blood_group|health(?!_?(?:check|z|endpoint|status))|medical|diagnosis|disease',
     PIICategory.FINANCIAL: r'bank_account|account_no|ifsc|credit_card|salary',
     PIICategory.NAME:      r'full_name|first_name|last_name|username',
@@ -123,6 +124,17 @@ def _pass1_categories(norm_line: str) -> list[PIICategory]:
 
 
 # ── Comment handling ──────────────────────────────────────────────────────────
+
+# Longest code line stored with a finding. Ordinary source lines are kept
+# whole; only longer ones (minified bundles, embedded data) are cut, and the
+# cut is marked with "…" so a stored line is never mistaken for the full one.
+RAW_TEXT_MAX = 1000
+
+
+def _snippet(text: str) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= RAW_TEXT_MAX else text[:RAW_TEXT_MAX] + "…"
+
 
 def _strip_inline_comment(line: str, lang: str) -> str:
     """
@@ -576,19 +588,28 @@ def _python_sdk_aliases(tree) -> dict[str, str]:
 
 # Government verification endpoints (e.g. UIDAI Aadhaar authentication) are
 # not Data Processors engaged by the fiduciary, so a call to them is not a
-# Section 8(2) transmission. Only literal URLs (or module-level string
-# constants) on these hosts are exempted.
+# Section 8(2) transmission. Only URLs the scanner can resolve statically
+# (a literal, an f-string / template literal that starts with one, or a name
+# assigned a literal string in the same file) are exempted.
 _GOV_HOST_RE = re.compile(r'(?:^|\.)(?:gov\.in|nic\.in)$', re.I)
 
 
 def _module_str_constants(tree) -> dict[str, str]:
+    """Names assigned a literal string anywhere in the module (module level
+    or inside a function, e.g. `url = "https://maps…"`). A name assigned two
+    different strings is ambiguous and left out."""
     consts: dict[str, str] = {}
-    for node in getattr(tree, 'body', []):
+    ambiguous: set[str] = set()
+    for node in ast.walk(tree):
         if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)):
             for t in node.targets:
                 if isinstance(t, ast.Name):
+                    if t.id in consts and consts[t.id] != node.value.value:
+                        ambiguous.add(t.id)
                     consts[t.id] = node.value.value
+    for name in ambiguous:
+        consts.pop(name, None)
     return consts
 
 
@@ -609,11 +630,20 @@ def _py_url_of(call, constants: dict[str, str]) -> str | None:
 
 
 def _is_gov_url(url: str | None) -> bool:
-    if not url:
-        return False
-    from urllib.parse import urlparse
-    host = urlparse(url).hostname or ''
-    return bool(_GOV_HOST_RE.search(host))
+    host = url_host(url)
+    return bool(host and _GOV_HOST_RE.search(host))
+
+
+def _http_recipient(label: str | None, url: str | None) -> str | None:
+    """For an HTTP sink, the recipient named by its URL: None for a
+    government verification host (not a transmission), the SDK label for a
+    known SDK host, otherwise the host name. Falls back to the HTTP label
+    (e.g. "requests.post") when the URL cannot be resolved statically."""
+    if not label or sink_kind(label) != 'http':
+        return label
+    if _is_gov_url(url):
+        return None
+    return recipient_for_url(url) or label
 
 
 def _python_call_label(call, aliases: dict[str, str], constants: dict[str, str]) -> str | None:
@@ -623,9 +653,7 @@ def _python_call_label(call, aliases: dict[str, str], constants: dict[str, str])
         return None
     root = _py_root_name(call.func)
     label = aliases[root] if root in aliases else canonical_sink(callee + '(')
-    if label and sink_kind(label) == 'http' and _is_gov_url(_py_url_of(call, constants)):
-        return None
-    return label
+    return _http_recipient(label, _py_url_of(call, constants))
 
 
 _KIND_RANK = {'sdk': 0, 'http': 1, 'queue': 2, 'logger': 3}
@@ -633,6 +661,21 @@ _KIND_RANK = {'sdk': 0, 'http': 1, 'queue': 2, 'logger': 3}
 
 def _rank(label: str) -> int:
     return _KIND_RANK.get(sink_kind(label), 9)
+
+
+class _LineSinks(dict):
+    """{line → sink label} for every line inside a sink call, plus
+    `call_line`: {line → the line that call starts on}. A multi-line call is
+    ONE transmission, so the rule engine cites it once, at its first line,
+    even when PII is found on several of its argument lines."""
+    def __init__(self):
+        super().__init__()
+        self.call_line: dict[int, int] = {}
+
+    def offer(self, ln: int, label: str, start: int) -> None:
+        if ln not in self or _rank(label) < _rank(self[ln]):
+            self[ln] = label
+            self.call_line[ln] = start
 
 
 def _python_call_sinks(source_text: str) -> dict[int, str] | None:
@@ -653,7 +696,7 @@ def _python_call_sinks(source_text: str) -> dict[int, str] | None:
         return None
     aliases = _python_sdk_aliases(tree)
     constants = _module_str_constants(tree)
-    by_line: dict[int, str] = {}
+    by_line = _LineSinks()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -661,8 +704,7 @@ def _python_call_sinks(source_text: str) -> dict[int, str] | None:
         if not label:
             continue
         for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
-            if ln not in by_line or _rank(label) < _rank(by_line[ln]):
-                by_line[ln] = label
+            by_line.offer(ln, label, node.lineno)
     return by_line
 
 
@@ -745,7 +787,7 @@ def _python_taint_analysis(
         for arg in list(node.args) + [kw.value for kw in node.keywords]:
             cats |= _py_expr_cats(arg, tainted)
         call_line = getattr(node, 'lineno', 0)
-        raw = (lines[call_line - 1] if 0 < call_line <= len(lines) else "").strip()[:200]
+        raw = _snippet(lines[call_line - 1] if 0 < call_line <= len(lines) else "")
         for cat in sorted(cats, key=lambda c: c.value):
             taint_findings.append({
                 "file_path":    file_path,
@@ -819,10 +861,54 @@ def _ts_walk(node):
         yield from _ts_walk(child)
 
 
-def _js_call_label(func_text: str, aliases: dict[str, str]) -> str | None:
+_JS_STR_CONST_RE = re.compile(
+    r"""(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:'([^'\n]*)'|"([^"\n]*)"|`([^`$\n]*)`)""")
+
+
+def _js_str_constants(source_text: str) -> dict[str, str]:
+    """`const NAME = "literal"` anywhere in the file; ambiguous names dropped."""
+    consts: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for m in _JS_STR_CONST_RE.finditer(source_text):
+        val = next(g for g in m.groups()[1:] if g is not None)
+        if m.group(1) in consts and consts[m.group(1)] != val:
+            ambiguous.add(m.group(1))
+        consts[m.group(1)] = val
+    for name in ambiguous:
+        consts.pop(name, None)
+    return consts
+
+
+_JS_TEMPLATE_HEAD_RE = re.compile(r'^`([^`$]*)(?:\$\{\s*([A-Za-z_$][\w$]*)\s*\})?')
+
+
+def _js_url_of(args_node, src: bytes, consts: dict[str, str]) -> str | None:
+    """URL of a call's first argument, when it can be resolved statically."""
+    if args_node is None:
+        return None
+    first = next((c for c in args_node.named_children if c.type != 'comment'), None)
+    if first is None:
+        return None
+    text = src[first.start_byte:first.end_byte].decode('utf-8', 'ignore')
+    if first.type == 'string' and len(text) >= 2:
+        return text[1:-1]
+    if first.type == 'identifier':
+        return consts.get(text)
+    if first.type == 'template_string':
+        m = _JS_TEMPLATE_HEAD_RE.match(text)
+        if m:
+            if m.group(1):
+                return m.group(1)
+            if m.group(2):
+                return consts.get(m.group(2))
+    return None
+
+
+def _js_call_label(func_text: str, aliases: dict[str, str], url: str | None = None) -> str | None:
     m = _JS_NAME_RE.match(func_text)
     root = m.group(0) if m else None
-    return aliases[root] if root in aliases else canonical_sink(func_text + '(')
+    label = aliases[root] if root in aliases else canonical_sink(func_text + '(')
+    return _http_recipient(label, url)
 
 
 def _js_call_sinks(source_text: str) -> dict[int, str] | None:
@@ -833,19 +919,20 @@ def _js_call_sinks(source_text: str) -> dict[int, str] | None:
         return None
     src = bytes(source_text, "utf-8")
     aliases = _js_sdk_aliases(source_text)
-    by_line: dict[int, str] = {}
+    consts = _js_str_constants(source_text)
+    by_line = _LineSinks()
     for node in _ts_walk(tree.root_node):
         if node.type != "call_expression":
             continue
         func = node.child_by_field_name("function")
         if func is None:
             continue
-        label = _js_call_label(src[func.start_byte:func.end_byte].decode("utf-8", "ignore"), aliases)
+        label = _js_call_label(src[func.start_byte:func.end_byte].decode("utf-8", "ignore"), aliases,
+                               _js_url_of(node.child_by_field_name("arguments"), src, consts))
         if not label:
             continue
         for ln in range(node.start_point[0] + 1, node.end_point[0] + 2):
-            if ln not in by_line or _rank(label) < _rank(by_line[ln]):
-                by_line[ln] = label
+            by_line.offer(ln, label, node.start_point[0] + 1)
     return by_line
 
 
@@ -879,6 +966,7 @@ def _js_taint_analysis(
     lines = source_text.splitlines()
     tainted = _seed_taint(lines, line_findings, 'js')
     aliases = _js_sdk_aliases(source_text)
+    consts = _js_str_constants(source_text)
 
     def _node_text(node) -> str:
         return src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
@@ -920,11 +1008,11 @@ def _js_taint_analysis(
         args = node.child_by_field_name("arguments")
         if func is None or args is None:
             continue
-        sink = _js_call_label(_node_text(func), aliases)
+        sink = _js_call_label(_node_text(func), aliases, _js_url_of(args, src_bytes, consts))
         if not sink:
             continue
         line_no = node.start_point[0] + 1
-        raw = (lines[line_no - 1] if line_no - 1 < len(lines) else "").strip()[:200]
+        raw = _snippet(lines[line_no - 1] if line_no - 1 < len(lines) else "")
         for cat in sorted(_text_cats(_node_text(args)), key=lambda c: c.value):
             taint_findings.append({
                 "file_path":    file_path,
@@ -987,11 +1075,14 @@ def _scan_single_file(
                 source=source,
                 file_path=file_obj.path,
                 line_number=line_num,
-                raw_text=raw.strip()[:200],
+                raw_text=_snippet(raw),
                 field_name=field,
                 pii_category=cat,
                 sensitivity=sens,
                 third_party_sdk=sink,
+                module_types=sorted(file_module_types),
+                call_line=(_call_sinks.call_line.get(line_num)
+                           if sink and isinstance(_call_sinks, _LineSinks) else None),
             ))
             line_pii.append((line_num, cat))
             file_usage_map.setdefault(cat, set()).update(file_module_types)
@@ -1119,6 +1210,8 @@ def _scan_single_file(
                 pii_category=cat,
                 sensitivity=SENSITIVITY_MAP.get(cat, Sensitivity.UNKNOWN),
                 third_party_sdk=tr["sink"],   # canonical label from sinks.py
+                module_types=sorted(file_module_types),
+                call_line=tr["line_number"],  # taint findings sit on the call's first line
             ))
             file_usage_map.setdefault(cat, set()).update(file_module_types)
 

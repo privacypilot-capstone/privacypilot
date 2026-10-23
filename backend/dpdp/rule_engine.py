@@ -6,7 +6,14 @@ Implements three detection rules mapped to the Act's sections:
   Rule 1 — Notice Gap         : Section 5 (Notice) + Section 6(1) (Consent)
   Rule 2 — Third-Party Xmit   : Section 8(2) (processor only under a valid
                                  contract) for SDK / HTTP / queue sinks;
-                                 Section 8(5) (security safeguards) for logger sinks
+                                 Section 8(5) (security safeguards) for local
+                                 logger sinks; both, in one violation, for
+                                 external logging services (Sentry, Datadog,
+                                 CloudWatch)
+
+One violation per (rule, PII category[, recipient]); each lists every code
+location it covers. A finding can still raise several violations when it
+breaches several provisions (e.g. a notice gap AND an undisclosed processor).
   Rule 3 — Purpose–PII Linkage: Section 6(1) (specified purpose / necessity)
 
 Section mapping verified against DPDP Act 2023 text:
@@ -27,6 +34,7 @@ Section mapping verified against DPDP Act 2023 text:
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.sinks import (
     sink_kind, SDK_LABELS, HTTP_LABELS, QUEUE_LABELS, LOGGER_LABELS,
+    EXTERNAL_LOGGER_LABELS,
 )
 
 # ── PII sensitivity tiers ───────────────────────────────────────────────────
@@ -88,7 +96,16 @@ MODULE_TO_PURPOSE: dict[str, set[str]] = {
 
 
 class DPDPViolation:
-    def __init__(self, section, title, severity, pii_category, evidence, recommendation):
+    def __init__(self, section, title, severity, pii_category, evidence, recommendation,
+                 recipient=None, locations=None):
+        # recipient: for third-party transmission / logging (Rule 2), the SDK,
+        # host or logging service the data reaches ("application logs" for
+        # local log calls); None for the other rules.
+        # locations: every code location behind this violation, as
+        # [{"file", "line", "origin"?, "modules"?, "sinks"?}, ...]; the
+        # evidence text lists the same locations.
+        self.recipient      = recipient
+        self.locations      = locations or []
         self.dpdp_section   = section
         self.section_title  = title
         self.severity       = severity
@@ -104,6 +121,8 @@ class DPDPViolation:
             "pii_category":   self.pii_category,
             "evidence":       self.evidence,
             "recommendation": self.recommendation,
+            "recipient":      self.recipient,
+            "locations":      self.locations,
         }
 
 
@@ -130,6 +149,116 @@ _ORIGIN_NOTE = {
 
 def _origin_note(finding) -> str:
     return _ORIGIN_NOTE.get(getattr(finding, "origin", None) or "", "")
+
+
+# Recipient name for every local log call (print, logging, logger, log,
+# console.log): they all write to the application's own logs, so they are
+# one recipient — one violation per category, not one per log function.
+LOCAL_LOG_RECIPIENT = "application logs"
+
+
+def _is_first_party(finding) -> bool:
+    return getattr(finding, "origin", None) in (None, "first_party")
+
+
+def _plural(n: int, word: str) -> str:
+    return word if n == 1 else f"{word}s"
+
+
+def _locations(findings, with_modules: bool = False, with_sink: bool = False,
+               by_call: bool = False) -> list[dict]:
+    """
+    Distinct (file, line) locations of `findings`: the application's own code
+    first, then by file and line. Several findings on one line (e.g. the regex
+    pass and the taint pass) are one location. With by_call, a finding inside
+    a multi-line sink call is placed on the call's first line (call_line), so
+    one call carrying PII on several argument lines is ONE location.
+    """
+    out: dict = {}
+    for f in findings:
+        line = (getattr(f, "call_line", None) or f.line_number) if by_call else f.line_number
+        k = (f.file_path, line)
+        loc = out.get(k)
+        if loc is None:
+            loc = {"file": f.file_path, "line": line}
+            origin = getattr(f, "origin", None)
+            if origin and origin != "first_party":
+                loc["origin"] = origin
+            out[k] = loc
+        if with_modules and getattr(f, "module_types", None):
+            loc["modules"] = sorted(set(loc.get("modules", [])) | set(f.module_types))
+        if with_sink and f.third_party_sdk:
+            loc["sinks"] = sorted(set(loc.get("sinks", [])) | {f.third_party_sdk})
+    return sorted(out.values(), key=lambda l: (
+        "origin" in l, l.get("file") or "", l.get("line") or 0))
+
+
+_ORIGIN_TAG = {"third_party": "third-party code", "generated": "generated code"}
+
+
+def _location_label(loc: dict) -> str:
+    s = f"{loc.get('file') or 'unknown file'} line {loc.get('line')}"
+    if loc.get("sinks"):
+        s += f" ({', '.join(loc['sinks'])})"
+    if loc.get("modules"):
+        s += f" (module: {', '.join(loc['modules'])})"
+    if loc.get("origin") in _ORIGIN_TAG:
+        s += f" [{_ORIGIN_TAG[loc['origin']]}]"
+    return s
+
+
+# Up to this many locations are written into the evidence sentence; above
+# it the sentence gives the count and the full list is the violation's
+# `locations` (shown by the UI, the HTML/PDF reports, the CSV export and the
+# API), so a long list is not printed twice.
+INLINE_LOCATIONS = 3
+
+
+def _locations_text(locs: list[dict], prefix: str = "at") -> str:
+    """'at a.py line 3', 'at 3 locations: a.py line 3; b.py line 9; c.py line 1'
+    or 'at 40 locations (all listed under Code locations)'. Every location is
+    always reported, so fixing the code at one place cannot be mistaken for
+    fixing the violation."""
+    if not locs:
+        return ""
+    if len(locs) == 1:
+        return f"{prefix} {_location_label(locs[0])}"
+    if len(locs) <= INLINE_LOCATIONS:
+        return f"{prefix} {len(locs)} locations: " + "; ".join(_location_label(l) for l in locs)
+    return f"{prefix} {len(locs)} locations (all listed under Code locations)"
+
+
+def _origin_notes(findings) -> str:
+    """Explain third-party / generated locations (marked in the location list)."""
+    findings = list(findings)
+    origins = {getattr(f, "origin", None) for f in findings}
+    distinct = {(f.file_path, getattr(f, "call_line", None) or f.line_number)
+                for f in findings}
+    if len(distinct) == 1:
+        return _origin_note(findings[0])
+    notes = ""
+    if "third_party" in origins:
+        notes += (" Locations marked [third-party code] are inside third-party "
+                  "code bundled in the repository (e.g. a vendored SDK or "
+                  "node_modules package); the Data Fiduciary is responsible for "
+                  "what the software it ships transmits.")
+    if "generated" in origins:
+        notes += (" Locations marked [generated code] are in generated/built "
+                  "code (e.g. dist/ or a minified bundle) committed to the "
+                  "repository.")
+    return notes
+
+
+def _policy_recipient_clause(recipient, cat, is_disclosed, named_for) -> str:
+    if is_disclosed:
+        return (f"The privacy policy names '{recipient}' as a recipient of this "
+                f"data; whether a valid contract with it exists cannot be "
+                f"verified from the policy text or source code alone.")
+    if named_for:
+        return (f"The privacy policy names '{recipient}' as a recipient of "
+                f"{', '.join(named_for)} data, but not of '{cat.value}' data.")
+    return (f"The privacy policy does not name '{recipient}' as a recipient "
+            f"of this data.")
 
 
 def run_dpdp_rules(
@@ -167,8 +296,9 @@ def run_dpdp_rules(
     and says in the evidence when the call is in third-party code. Rules 1
     and 3 concern what the application itself collects and why, so the
     caller computes gap_categories and usage_map from first-party code only.
-    Pass first-party findings first so the location each violation cites is
-    in the application's own code whenever one exists.
+    Every violation lists ALL of its code locations (evidence text and
+    DPDPViolation.locations); pass first-party findings first so they are
+    listed first.
 
     Returns
     -------
@@ -177,199 +307,263 @@ def run_dpdp_rules(
     violations = []
     seen = set()
 
-    # Build a location index: {PIICategory → [(file_path, line_number), ...]}
-    # Used by Rule 3 to cite concrete evidence locations in violation messages.
-    # Only the application's own code is cited: Rule 3 is about how the
-    # application uses the data, not about a bundled library's internals.
-    _loc_index: dict = {}
-    for _f in code_findings:
-        if getattr(_f, "origin", None) not in (None, "first_party"):
-            continue
-        _loc_index.setdefault(_f.pii_category, []).append(
-            (_f.file_path, _f.line_number)
-        )
-
     # ── Rule 1: Notice Gap — Section 5 + Section 6(1) ──────────────────────
     # PII is found in source code but NOT disclosed in the privacy policy.
     # Section 5 requires the data fiduciary to give notice of what data is
     # collected and for what purpose before or at the time of collection.
     # Section 6(1) makes consent invalid without proper prior notice.
+    #
+    # One violation per category, citing EVERY place the application's own
+    # code handles it (third-party code only when there is no first-party
+    # occurrence), each with the code modules it sits in. Because the policy
+    # does not mention the category at all, none of the purposes those
+    # modules serve is stated either: that Section 6(1) purpose gap is
+    # reported here, in the same violation, rather than as a separate Rule 3
+    # violation for the same category.
 
+    gap_findings: dict = {}
     for finding in code_findings:
-        cat = finding.pii_category
-        loc = f"{finding.file_path} line {finding.line_number}"
+        if finding.pii_category in gap_categories:
+            gap_findings.setdefault(finding.pii_category, []).append(finding)
 
-        if cat in gap_categories:
-            is_sensitive = cat in SENSITIVE_CATEGORIES
-            key = f"r1_{cat.value}"
-            if key not in seen:
-                seen.add(key)
-                severity = "critical" if is_sensitive else "high"
-                violations.append(DPDPViolation(
-                    section="Section 5 / Section 6(1)",
-                    title="Notice Gap — Undisclosed Data Collection",
-                    severity=severity,
-                    pii_category=cat.value,
-                    evidence=(
-                        f"'{cat.value}' data is collected in source code "
-                        f"(e.g. {loc}) but is absent from the privacy policy. "
-                        f"Section 5 of the DPDP Act 2023 requires the data "
-                        f"fiduciary to give notice of all categories of personal "
-                        f"data collected. Without this disclosure, consent under "
-                        f"Section 6(1) cannot be free, specific, or informed."
-                    ),
-                    recommendation=(
-                        f"1. Add an explicit entry for '{cat.value}' data to the "
-                        f"privacy policy, describing what is collected and the "
-                        f"purpose for which it is processed (Section 5(1)(i)). "
-                        f"2. Present this notice before or at the point of collection. "
-                        f"3. Implement a consent gate that is gated on disclosure."
-                    ),
-                ))
+    for cat, fs in gap_findings.items():
+        key = f"r1_{cat.value}"
+        if key in seen:
+            continue
+        seen.add(key)
+        own = [f for f in fs if _is_first_party(f)] or fs
+        locs = _locations(own, with_modules=True)
+        is_sensitive = cat in SENSITIVE_CATEGORIES
+        modules = sorted({m for f in own for m in (f.module_types or [])})
+        if usage_map and cat in usage_map:
+            modules = sorted(set(modules) | set(usage_map[cat]))
+        purposes = sorted({p for m in modules
+                           for p in MODULE_TO_PURPOSE.get(m, {m})})
+        _purpose_clause = (
+            f" The code processes it in {_plural(len(modules), 'module')} "
+            f"{', '.join(modules)} (purpose(s) these modules typically serve: "
+            f"{', '.join(purposes)}); none of these purposes is stated, because "
+            f"the policy does not mention this data at all."
+            if modules else ""
+        )
+        violations.append(DPDPViolation(
+            section="Section 5 / Section 6(1)",
+            title="Notice Gap — Undisclosed Data Collection",
+            severity="critical" if is_sensitive else "high",
+            pii_category=cat.value,
+            evidence=(
+                f"'{cat.value}' data is collected or processed by the code "
+                f"{_locations_text(locs)} but is absent from the privacy "
+                f"policy.{_purpose_clause} Section 5 of the "
+                f"DPDP Act 2023 requires the data fiduciary to give notice of "
+                f"the personal data collected and the purpose of processing. "
+                f"Without this disclosure, consent under Section 6(1) cannot "
+                f"be free, specific, or informed."
+            ),
+            recommendation=(
+                f"1. Add an explicit entry for '{cat.value}' data to the "
+                f"privacy policy, describing what is collected and the "
+                f"purpose for which it is processed (Section 5(1)(i))"
+                + (f" — the code uses it for: {', '.join(purposes)}" if purposes else "")
+                + ". "
+                f"2. Present this notice before or at the point of collection. "
+                f"3. Implement a consent gate that is gated on disclosure."
+            ),
+            locations=locs,
+        ))
 
-    # ── Rule 2: Third-Party Transmission ────────────────────────────────────
-    # PII is co-located with a third-party SDK call.
+    # ── Rule 2: Third-Party Transmission / Logging ──────────────────────────
     # • SDK / HTTP / queue sinks → Section 8(2): a Data Processor may only be
     #   engaged under a valid contract, which cannot be verified from code.
     #   (Previously also cited as Section 5, on the claim that the notice must
     #   name third parties — Section 5(1) contains no such requirement.)
-    # • Logger sinks → Section 8(5) (security safeguard failure — logging PII
-    #   risks unauthorised disclosure via log files / monitoring systems).
+    # • Local logger sinks (print, logging, logger, console.log …) →
+    #   Section 8(5) (security safeguard failure — PII in log files).
+    #   All local log calls are ONE recipient ("application logs"), so a
+    #   category logged through both print() and logger.info() is one
+    #   violation listing both, not two.
+    # • External logging / monitoring services (Sentry, Datadog, CloudWatch)
+    #   → Section 8(5) AND Section 8(2) in one violation: the data is in logs
+    #   and it is also sent to a third party that processes it.
+    #
+    # One violation per (category, recipient), citing every location.
 
+    groups: dict = {}            # (kind, cat, recipient) → [finding, ...]
     for finding in code_findings:
-        cat = finding.pii_category
         sdk = finding.third_party_sdk
-        loc = f"{finding.file_path} line {finding.line_number}"
-        raw = finding.raw_text or ""
-
         if not sdk:
             continue
+        if _is_logger_sink(sdk, finding.raw_text or ""):
+            if sdk.lower() in EXTERNAL_LOGGER_LABELS:
+                gk = ("extlog", finding.pii_category, sdk.lower())
+            else:
+                gk = ("log", finding.pii_category, LOCAL_LOG_RECIPIENT)
+        elif sink_kind(sdk.lower()) in ('sdk', 'http', 'queue'):
+            gk = ("xmit", finding.pii_category, sdk)
+        else:
+            continue
+        groups.setdefault(gk, []).append(finding)
 
-        sdk_lower = sdk.lower()
+    for (kind, cat, recipient), fs in groups.items():
+        is_sensitive = cat in SENSITIVE_CATEGORIES
+        locs = _locations(fs, with_sink=(kind == "log"), by_call=True)
+        where = _locations_text(locs)
+        notes = _origin_notes(fs)
+        rec_lower = recipient.lower()
+        _disclosed_set = {s.lower() for s in (disclosed_sdks or {}).get(cat, set())}
+        _named_for = sorted(
+            c.value for c, sdks in (disclosed_sdks or {}).items()
+            if rec_lower in {s.lower() for s in sdks}
+        )
 
-        # Logger-sink path — Section 8(5)
-        if _is_logger_sink(sdk, raw):
-            key = f"r2_log_{cat.value}_{sdk}"
-            if key not in seen:
-                seen.add(key)
-                is_sensitive = cat in SENSITIVE_CATEGORIES
-                violations.append(DPDPViolation(
-                    section="Section 8(5)",
-                    title="Security Safeguard — PII in Logger Output",
-                    severity="critical" if is_sensitive else "high",
-                    pii_category=cat.value,
-                    evidence=(
-                        f"'{cat.value}' data appears in a log/print statement "
-                        f"at {loc}.{_origin_note(finding)} Logging personal data exposes it in log files, "
-                        f"monitoring dashboards, and log-aggregation services. "
-                        f"Section 8(5) requires the Data Fiduciary to take "
-                        f"reasonable security safeguards to prevent personal "
-                        f"data breach."
-                    ),
-                    recommendation=(
-                        f"Remove or mask '{cat.value}' from all log statements "
-                        f"(masking and obfuscation are safeguards listed in DPDP "
-                        f"Rules 2025, Rule 6(1)(a)). Use structured logging with a "
-                        f"PII-scrubbing filter. Treat log sinks as untrusted "
-                        f"channels for personal data."
-                    ),
-                ))
-            continue  # logged → don't also fire SDK rules for same finding
+        if kind == "log":
+            key = f"r2_log_{cat.value}"
+            if key in seen:
+                continue
+            seen.add(key)
+            violations.append(DPDPViolation(
+                section="Section 8(5)",
+                title="Security Safeguard — PII in Logger Output",
+                recipient=recipient,
+                severity="critical" if is_sensitive else "high",
+                pii_category=cat.value,
+                evidence=(
+                    f"'{cat.value}' data appears in log/print statements "
+                    f"{where}.{notes} Logging personal data exposes it in log "
+                    f"files, monitoring dashboards, and log-aggregation "
+                    f"services. Section 8(5) requires the Data Fiduciary to "
+                    f"take reasonable security safeguards to prevent personal "
+                    f"data breach."
+                ),
+                recommendation=(
+                    f"Remove or mask '{cat.value}' from all log statements "
+                    f"(masking and obfuscation are safeguards listed in DPDP "
+                    f"Rules 2025, Rule 6(1)(a)). Use structured logging with a "
+                    f"PII-scrubbing filter. Treat log sinks as untrusted "
+                    f"channels for personal data."
+                ),
+                locations=locs,
+            ))
+            continue
 
-        # SDK / HTTP / Queue sink path — Section 8(2)
-        if sink_kind(sdk_lower) in ('sdk', 'http', 'queue'):
-            is_sensitive = cat in SENSITIVE_CATEGORIES
+        if kind == "extlog":
+            key = f"r2_extlog_{cat.value}_{rec_lower}"
+            if key in seen:
+                continue
+            seen.add(key)
+            is_disclosed = rec_lower in _disclosed_set
+            _policy_clause = _policy_recipient_clause(recipient, cat, is_disclosed, _named_for)
+            violations.append(DPDPViolation(
+                section="Section 8(5) / Section 8(2)",
+                title="Security Safeguard — PII Sent to External Logging Service",
+                recipient=recipient,
+                severity="critical" if is_sensitive else "high",
+                pii_category=cat.value,
+                evidence=(
+                    f"'{cat.value}' data is sent to the logging/monitoring "
+                    f"service '{recipient}' {where}.{notes} Logging personal "
+                    f"data exposes it in log files and dashboards; Section 8(5) "
+                    f"requires reasonable security safeguards to prevent "
+                    f"personal data breach. '{recipient}' is also a third party "
+                    f"processing the data on the Data Fiduciary's behalf. "
+                    f"{_policy_clause} Section 8(2) permits a Data Processor "
+                    f"to be engaged only under a valid contract, and under "
+                    f"Section 8(1) the Data Fiduciary remains responsible for "
+                    f"its processing."
+                ),
+                recommendation=(
+                    f"1. Remove or mask '{cat.value}' before it reaches "
+                    f"'{recipient}' (masking and obfuscation are safeguards "
+                    f"listed in DPDP Rules 2025, Rule 6(1)(a)); configure the "
+                    f"service's PII scrubbing. "
+                    f"2. Confirm a valid contract (Data Processing Agreement) "
+                    f"with '{recipient}' is in place"
+                    + ("." if is_disclosed else
+                       f" and name '{recipient}' as a processor in the privacy "
+                       f"policy for transparency.")
+                ),
+                locations=locs,
+            ))
+            continue
 
-            # Has the privacy policy already named this SDK as a recipient
-            # of this PII category (policy_parser Pass 3)? Only the named-
-            # company sink lists (ALL_SDK_SINKS) are checkable this way —
-            # HTTP_SINKS/QUEUE_SINKS are generic code patterns ('requests.post',
-            # 'kafka'), not names a policy would plausibly disclose by string
-            # match, so they always fall through to the undisclosed branch.
-            _disclosed_set = (disclosed_sdks or {}).get(cat, set())
-            is_disclosed = (
-                sink_kind(sdk_lower) == 'sdk'
-                and sdk_lower in {s.lower() for s in _disclosed_set}
-            )
-
-            key = f"r2_sdk_{cat.value}_{sdk}"
-            if key not in seen:
-                seen.add(key)
-                if is_disclosed:
-                    # The policy already names '{sdk}' as a recipient of this
-                    # data, so it is not flagged as undisclosed. What remains
-                    # unverifiable from the policy text or source code alone
-                    # is Section 8(2): whether a valid processor contract
-                    # exists. Flag that narrower gap at medium severity.
-                    violations.append(DPDPViolation(
-                        section="Section 8(2)",
-                        title="Third-Party Transmission — Processor Contract Unverified",
-                        severity="medium",
-                        pii_category=cat.value,
-                        evidence=(
-                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}."
-                            f"{_origin_note(finding)} "
-                            f"The privacy policy already names '{sdk}' as a "
-                            f"recipient of this data. Section 8(2) permits a Data "
-                            f"Processor to be engaged only under a valid contract, "
-                            f"and under Section 8(1) the Data Fiduciary remains "
-                            f"responsible for its processing — whether such a "
-                            f"contract exists cannot be verified from the policy "
-                            f"text or source code alone."
-                        ),
-                        recommendation=(
-                            f"Confirm a valid, signed contract (Data Processing "
-                            f"Agreement) with '{sdk}' is in place, including the "
-                            f"security safeguards it must apply (DPDP Rules 2025, "
-                            f"Rule 6(1)(f))."
-                        ),
-                    ))
-                else:
-                    # Recipient not named in the policy for THIS data. If the
-                    # policy names the SDK for other categories, say so —
-                    # otherwise readers (and the LLM summary) take it to mean
-                    # the SDK is missing from the policy altogether.
-                    severity = "critical" if is_sensitive else "high"
-                    _named_for = sorted(
-                        c.value for c, sdks in (disclosed_sdks or {}).items()
-                        if sdk_lower in {s.lower() for s in sdks}
-                    )
-                    _policy_clause = (
-                        f"The privacy policy names '{sdk}' as a recipient of "
-                        f"{', '.join(_named_for)} data, but not of '{cat.value}' data."
-                        if _named_for else
-                        f"The privacy policy does not name '{sdk}' as a recipient "
-                        f"of this data."
-                    )
-                    violations.append(DPDPViolation(
-                        section="Section 8(2)",
-                        title="Third-Party Transmission — Undisclosed Data Processor",
-                        severity=severity,
-                        pii_category=cat.value,
-                        evidence=(
-                            f"'{cat.value}' data is transmitted to '{sdk}' at {loc}."
-                            f"{_origin_note(finding)} "
-                            f"{_policy_clause} Section 8(2) permits a Data "
-                            f"Processor to be engaged only under a valid contract, "
-                            f"and under Section 8(1) the Data Fiduciary remains "
-                            f"responsible for its processing."
-                        ),
-                        recommendation=(
-                            f"1. Execute a valid contract (Data Processing Agreement) "
-                            f"with '{sdk}', including the security safeguards it must "
-                            f"apply (DPDP Rules 2025, Rule 6(1)(f)). "
-                            f"2. Name '{sdk}' as a processor in the privacy policy for "
-                            f"transparency. "
-                            f"3. '{cat.value}' is treated as high-risk by PrivacyPilot "
-                            f"(a project severity tier, not a category defined in the "
-                            f"Act): minimise or tokenise it before sharing."
-                            if is_sensitive else
-                            f"1. Execute a valid contract (Data Processing Agreement) "
-                            f"with '{sdk}'. "
-                            f"2. Name '{sdk}' as a processor in the privacy policy for "
-                            f"transparency."
-                        ),
-                    ))
+        # kind == "xmit": SDK / HTTP / queue sink — Section 8(2)
+        key = f"r2_sdk_{cat.value}_{recipient}"
+        if key in seen:
+            continue
+        seen.add(key)
+        # Has the privacy policy already named this SDK as a recipient of
+        # this PII category (policy_parser Pass 3)? Only the named-company
+        # sink lists (ALL_SDK_SINKS) are checkable this way — HTTP_SINKS /
+        # QUEUE_SINKS are generic code patterns ('requests.post', 'kafka'),
+        # not names a policy would plausibly disclose by string match, so
+        # they always fall through to the undisclosed branch.
+        is_disclosed = (sink_kind(rec_lower) == 'sdk' and rec_lower in _disclosed_set)
+        if is_disclosed:
+            # The policy already names the recipient for this data, so it is
+            # not flagged as undisclosed. What remains unverifiable from the
+            # policy text or source code alone is Section 8(2): whether a
+            # valid processor contract exists. Flag that at medium severity.
+            violations.append(DPDPViolation(
+                section="Section 8(2)",
+                title="Third-Party Transmission — Processor Contract Unverified",
+                recipient=recipient,
+                severity="medium",
+                pii_category=cat.value,
+                evidence=(
+                    f"'{cat.value}' data is transmitted to '{recipient}' "
+                    f"{where}.{notes} "
+                    f"The privacy policy already names '{recipient}' as a "
+                    f"recipient of this data. Section 8(2) permits a Data "
+                    f"Processor to be engaged only under a valid contract, "
+                    f"and under Section 8(1) the Data Fiduciary remains "
+                    f"responsible for its processing — whether such a "
+                    f"contract exists cannot be verified from the policy "
+                    f"text or source code alone."
+                ),
+                recommendation=(
+                    f"Confirm a valid, signed contract (Data Processing "
+                    f"Agreement) with '{recipient}' is in place, including the "
+                    f"security safeguards it must apply (DPDP Rules 2025, "
+                    f"Rule 6(1)(f))."
+                ),
+                locations=locs,
+            ))
+        else:
+            # Recipient not named in the policy for THIS data. If the policy
+            # names it for other categories, say so — otherwise readers (and
+            # the LLM summary) take it to mean it is missing altogether.
+            _policy_clause = _policy_recipient_clause(recipient, cat, False, _named_for)
+            violations.append(DPDPViolation(
+                section="Section 8(2)",
+                title="Third-Party Transmission — Undisclosed Data Processor",
+                recipient=recipient,
+                severity="critical" if is_sensitive else "high",
+                pii_category=cat.value,
+                evidence=(
+                    f"'{cat.value}' data is transmitted to '{recipient}' "
+                    f"{where}.{notes} "
+                    f"{_policy_clause} Section 8(2) permits a Data "
+                    f"Processor to be engaged only under a valid contract, "
+                    f"and under Section 8(1) the Data Fiduciary remains "
+                    f"responsible for its processing."
+                ),
+                recommendation=(
+                    f"1. Execute a valid contract (Data Processing Agreement) "
+                    f"with '{recipient}', including the security safeguards it must "
+                    f"apply (DPDP Rules 2025, Rule 6(1)(f)). "
+                    f"2. Name '{recipient}' as a processor in the privacy policy for "
+                    f"transparency. "
+                    f"3. '{cat.value}' is treated as high-risk by PrivacyPilot "
+                    f"(a project severity tier, not a category defined in the "
+                    f"Act): minimise or tokenise it before sharing."
+                    if is_sensitive else
+                    f"1. Execute a valid contract (Data Processing Agreement) "
+                    f"with '{recipient}'. "
+                    f"2. Name '{recipient}' as a processor in the privacy policy for "
+                    f"transparency."
+                ),
+                locations=locs,
+            ))
 
     # ── Rule 3: Purpose–PII Linkage — Section 6(1) ──────────────────────────
     # Cross-reference usage_map (how code uses each PII category, e.g. 'analytics')
@@ -382,15 +576,15 @@ def run_dpdp_rules(
     # at all is the worst case, and every module use then lacks a stated
     # purpose (previously the rule was skipped exactly then).
     #
-    # Categories already reported by Rule 1 (absent from the policy entirely)
-    # are skipped here: the notice gap already covers them, and reporting the
-    # same category twice double-penalised it in the compliance score.
+    # Categories reported by Rule 1 (absent from the policy entirely) are
+    # skipped here: the Rule 1 violation already states the purposes the code
+    # uses them for, so a second violation would duplicate it.
 
     if usage_map:
         purpose_map = purpose_map or {}
         for cat, code_uses in usage_map.items():
             if cat in gap_categories:
-                continue   # covered by Rule 1 — avoid double counting
+                continue   # reported, with its purposes, by Rule 1
             policy_purposes = purpose_map.get(cat, set())
 
             # Translate each module-type label into the purpose category(ies)
@@ -415,15 +609,18 @@ def run_dpdp_rules(
                 key = f"r3_{cat.value}"
                 if key not in seen:
                     seen.add(key)
-                    # Collect up to 3 concrete file+line locations for this category
-                    _locs = _loc_index.get(cat, [])
-                    _loc_strs = [
-                        f"{fp} line {ln}" for fp, ln in _locs[:3]
+                    # Every first-party location of this category that sits
+                    # in one of the uncovered modules. A finding without
+                    # module labels (older stored scans) cannot be placed,
+                    # so it is listed rather than dropped.
+                    in_scope = [
+                        f for f in code_findings
+                        if f.pii_category == cat and _is_first_party(f)
+                        and (f.module_types is None
+                             or set(f.module_types) & uncovered_modules)
                     ]
-                    _loc_clause = (
-                        f" (found at: {'; '.join(_loc_strs)})"
-                        if _loc_strs else ""
-                    )
+                    locs = _locations(in_scope, with_modules=True)
+                    _loc_clause = f" ({_locations_text(locs, prefix='found at')})" if locs else ""
                     is_sensitive = cat in SENSITIVE_CATEGORIES
                     violations.append(DPDPViolation(
                         section="Section 6(1)",
@@ -447,54 +644,59 @@ def run_dpdp_rules(
                             f"'{cat.value}' processing to the already-disclosed "
                             f"purposes: {sorted(policy_purposes) or ['none']}."
                         ),
+                        locations=locs,
                     ))
 
     # ── Vagueness warnings — DPDP Rules 2025, Rule 3(b)(ii) ─────────────────
     # When the purpose classifier's top-2 scores are within 0.08 of each other,
     # the stated purpose is ambiguous and fails the specificity requirement.
 
+    # One violation per vague STATEMENT. The parser emits a warning for each
+    # PII category a statement applies to (a generic "We use your information
+    # to …" statement applies to every disclosed category), which used to
+    # produce several violations — and several score penalties — for one
+    # sentence. The categories are listed in pii_category instead.
     if vagueness_warnings:
+        by_statement: dict[str, list[dict]] = {}
         for w in vagueness_warnings:
-            key = f"vague_{w.get('pii_category', 'unknown')}"
-            if key not in seen:
-                seen.add(key)
-                # Policy-based violations have no source file/line — the
-                # nearest equivalent is the actual ambiguous clause text, so
-                # quote it directly rather than leaving the location blank.
-                _sentence = (w.get("sentence") or "").strip()
-                _quote_clause = (
-                    f" The flagged clause: \"{_sentence}\""
-                    if _sentence else ""
-                )
-                violations.append(DPDPViolation(
-                    section="DPDP Rules 2025, Rule 3(b)(ii)",
-                    title="Vague Purpose Statement",
-                    # "low", not "medium": this is a pure language-clarity
-                    # gap under the subordinate DPDP Rules 2025, not a gap
-                    # in the Act's own notice/consent/processor-contract
-                    # obligations. It is the mildest finding the rule
-                    # engine raises -- the purpose IS stated, disclosed,
-                    # and linked; it's merely worded ambiguously -- so it
-                    # sits below the "disclosed-SDK, contract unverifiable"
-                    # medium case rather than sharing its severity.
-                    severity="low",
-                    pii_category=w.get("pii_category", "unknown"),
-                    evidence=(
-                        f"The privacy policy's purpose statement for "
-                        f"'{w.get('pii_category')}' is ambiguous: the classifier "
-                        f"margin between top-2 categories is "
-                        f"{w.get('margin', 0):.3f} (threshold 0.08), closest to "
-                        f"'{w.get('top_label', 'unknown')}'. "
-                        f"Rule 3(b)(ii) of DPDP Rules 2025 requires the notice "
-                        f"to specify the purpose of processing in clear and "
-                        f"plain language.{_quote_clause}"
-                    ),
-                    recommendation=(
-                        f"Rewrite the purpose clause for '{w.get('pii_category')}' "
-                        f"to be unambiguous. State exactly what the data is used for "
-                        f"rather than broad terms like 'improve services'."
-                    ),
-                ))
+            stmt = " ".join((w.get("sentence") or "").split()).lower()
+            by_statement.setdefault(stmt or f"(no text) {w.get('pii_category')}", []).append(w)
+        for stmt, ws in by_statement.items():
+            key = f"vague_{stmt}"
+            if key in seen:
+                continue
+            seen.add(key)
+            w = min(ws, key=lambda x: x.get("margin", 1.0))
+            cats = sorted({x.get("pii_category", "unknown") for x in ws})
+            cats_txt = ", ".join(cats)
+            _sentence = (w.get("sentence") or "").strip()
+            _quote_clause = (
+                f" The flagged clause: \"{_sentence}\"" if _sentence else ""
+            )
+            violations.append(DPDPViolation(
+                section="DPDP Rules 2025, Rule 3(b)(ii)",
+                title="Vague Purpose Statement",
+                # "low": a language-clarity gap under the subordinate Rules —
+                # the purpose IS stated, disclosed and linked, only worded
+                # ambiguously — so it sits below the medium "contract
+                # unverifiable" case.
+                severity="low",
+                pii_category=cats_txt,
+                evidence=(
+                    f"The privacy policy's purpose statement covering "
+                    f"{cats_txt} data is ambiguous: the classifier margin "
+                    f"between the top-2 purpose categories is "
+                    f"{w.get('margin', 0):.3f} (threshold 0.08), closest to "
+                    f"'{w.get('top_label', 'unknown')}'. Rule 3(b)(ii) of DPDP "
+                    f"Rules 2025 requires the notice to state the specified "
+                    f"purpose in clear and plain language.{_quote_clause}"
+                ),
+                recommendation=(
+                    f"Rewrite this purpose statement to be unambiguous. State "
+                    f"exactly what {cats_txt} data is used for rather than broad "
+                    f"terms like 'improve services'."
+                ),
+            ))
 
     n_provisions = len({v.dpdp_section for v in violations})
     print(

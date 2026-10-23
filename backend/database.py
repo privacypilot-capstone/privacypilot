@@ -120,6 +120,12 @@ class Violation(Base):
     pii_category   = Column(String)
     evidence       = Column(Text)     # what triggered this
     recommendation = Column(Text)     # what to fix
+    # Third-party transmission / logging only: the SDK, host or logger the
+    # data reaches (e.g. "firebase", "maps.googleapis.com", "application logs").
+    recipient      = Column(String, nullable=True)
+    # JSON list of every code location behind the violation
+    # ([{"file", "line", ...}]; DPDPViolation.locations).
+    locations      = Column(Text, nullable=True)
 
     scan = relationship("Scan", back_populates="violations")
 
@@ -183,6 +189,8 @@ def migrate_tables():
         "ALTER TABLE scans ADD COLUMN coverage TEXT",
         "ALTER TABLE scans ADD COLUMN task_id VARCHAR",
         "ALTER TABLE findings ADD COLUMN origin VARCHAR",
+        "ALTER TABLE violations ADD COLUMN recipient VARCHAR",
+        "ALTER TABLE violations ADD COLUMN locations TEXT",
         # The results page pages through a scan's findings; without this an
         # index-less scan of every finding of every scan runs per page.
         "CREATE INDEX IF NOT EXISTS ix_findings_scan_id ON findings (scan_id)",
@@ -256,6 +264,31 @@ def scan_gap_categories(scan, findings=None) -> list[str]:
         except (TypeError, ValueError):
             pass
     return sorted({f.pii_category for f in (findings or []) if f.is_gap})
+
+
+def violation_locations(v) -> list:
+    """Every code location behind a stored violation ([] for violations
+    stored before locations were recorded)."""
+    import json
+    try:
+        locs = json.loads(getattr(v, "locations", None) or "[]")
+    except (TypeError, ValueError):
+        return []
+    return locs if isinstance(locs, list) else []
+
+
+def location_label(loc: dict) -> str:
+    """'path line N (sinks) (module: …) [third-party code]' — the same form the
+    rule engine uses in evidence text."""
+    s = f"{loc.get('file') or 'unknown file'} line {loc.get('line')}"
+    if loc.get("sinks"):
+        s += f" ({', '.join(loc['sinks'])})"
+    if loc.get("modules"):
+        s += f" (module: {', '.join(loc['modules'])})"
+    tag = {"third_party": "third-party code", "generated": "generated code"}.get(loc.get("origin"))
+    if tag:
+        s += f" [{tag}]"
+    return s
 
 
 def get_db():

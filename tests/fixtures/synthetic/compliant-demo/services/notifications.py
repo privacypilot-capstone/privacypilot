@@ -1,21 +1,17 @@
-# Notification service for ShopIndia
-# Phone used for OTP — disclosed in privacy policy
+"""Notification service for ShopIndia."""
 
 from twilio.rest import Client
 
-TWILIO_SID   = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+TWILIO_SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 TWILIO_TOKEN = "your_auth_token"
-TWILIO_FROM  = "+1234567890"
+TWILIO_FROM = "+1234567890"
+
 
 def send_order_confirmation(user):
-    """
-    Sends order confirmation SMS.
-    Phone number use for SMS is disclosed in privacy policy
-    under section 2 — Communication.
-    """
+    """Send an order confirmation SMS to the registered phone number."""
     client = Client(TWILIO_SID, TWILIO_TOKEN)
     client.messages.create(
-        body  = f"Dear {user.full_name}, your order is confirmed.",
-        from_ = TWILIO_FROM,
-        to    = user.phone_number
+        body="Your order is confirmed.",
+        from_=TWILIO_FROM,
+        to=user.phone_number,
     )

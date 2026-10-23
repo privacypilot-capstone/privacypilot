@@ -1,0 +1,51 @@
+case_id,change_type,details
+HEALTH-V4,FIXED TEXT,removed duplicated phrase in expected_provision
+HEALTH-V5,FIXED TEXT,removed duplicated phrase in expected_provision
+HEALTH-V9,FIXED TEXT,removed duplicated phrase in expected_provision
+HEALTH-N8,FIXED TEXT,removed duplicated phrase in expected_provision
+DP-V1,PROVISION,"External-flow cases re-labelled to Section 8(2). The v4 label 'Section 5; Rule 3(b)' is not supported: Section 5(1) requires notice of the personal data and the purpose, not of recipients (Act text verified). The undisclosed purpose, where relevant, is a separate Rule 3 / Section 6(1) case."
+DP-V3,PROVISION,"External-flow cases re-labelled to Section 8(2). The v4 label 'Section 5; Rule 3(b)' is not supported: Section 5(1) requires notice of the personal data and the purpose, not of recipients (Act text verified). The undisclosed purpose, where relevant, is a separate Rule 3 / Section 6(1) case."
+DP-V6,PROVISION,"External-flow cases re-labelled to Section 8(2). The v4 label 'Section 5; Rule 3(b)' is not supported: Section 5(1) requires notice of the personal data and the purpose, not of recipients (Act text verified). The undisclosed purpose, where relevant, is a separate Rule 3 / Section 6(1) case."
+DP-V7,PROVISION,"External-flow cases re-labelled to Section 8(2). The v4 label 'Section 5; Rule 3(b)' is not supported: Section 5(1) requires notice of the personal data and the purpose, not of recipients (Act text verified). The undisclosed purpose, where relevant, is a separate Rule 3 / Section 6(1) case."
+DP-V8,PROVISION,"External-flow cases re-labelled to Section 8(2). The v4 label 'Section 5; Rule 3(b)' is not supported: Section 5(1) requires notice of the personal data and the purpose, not of recipients (Act text verified). The undisclosed purpose, where relevant, is a separate Rule 3 / Section 6(1) case."
+DP-V3,LINES,Function spans lines 21-25 (v4: 21-24).
+DP-V2,FIELDS,"Target is a notice gap (biometric data not in policy). 'BIOMETRIC_STORE' is an in-memory dict in the same file, not a recipient."
+DP-V4,PROVISION,Logging case kept positive as a Section 8(5) review signal.
+DP-V5,RELABELLED (judgment),"Recipient verified: UIDAI_URL = https://uidai.gov.in/api/verify (auth_service.py line 10). UIDAI is the government authority that authenticates Aadhaar, not a data processor engaged by the fiduciary, so this flow is proposed as NEGATIVE for third-party-transmission scoring. The Aadhaar notice gap is a separate positive case (DP-V10). HUMAN DECISION REQUIRED."
+DP-N4,LINES,"The Firebase/Mixpanel mentions are in the export_audit_log docstring, lines 19-25; v4 lines 1-3 are the module docstring, which mentions neither service."
+DP-N11,ADDED,Docstring mentions Aadhaar and a Firebase token; not executable.
+DP-V9,ADDED,"Location is processed (sent to Mixpanel) but the policy names only name, email and phone."
+DP-V10,ADDED,"Aadhaar is processed (logged, sent for verification) but not named in the policy."
+DP-V11,ADDED,Diagnosis is processed (sent to Firebase) but health data is not named in the policy.
+DP-J1,ADDED (judgment),"PROPOSED POSITIVE. Depends on whether 'improve our services' is read as stating an analytics purpose; we propose it does not, because consent must be specific."
+DP-J2,ADDED (judgment),"PROPOSED POSITIVE. Depends on whether 'improve our services' is read as stating an analytics purpose; we propose it does not, because consent must be specific."
+DP-J3,ADDED (judgment),PROPOSED POSITIVE. Two purposes and stock wording 'improve our services'.
+HEALTH-V4,PROVISION,Re-labelled to Section 8(2); Section 5 does not require naming recipients.
+HEALTH-V5,PROVISION,Re-labelled to Section 8(2); Section 5 does not require naming recipients.
+HEALTH-V9,PROVISION,Re-labelled to Section 8(2); Section 5 does not require naming recipients.
+HEALTH-V4,FIELDS,"Recipient verified: firebase_admin analytics.log_event (line 25) and requests.post to https://healthtrack-india.firebaseio.com (lines 8, 26); both are Firebase."
+HEALTH-V9,FIELDS,"email is the event's distinct_id (first argument of mp.track, line 36) and is therefore transmitted; address is a location field."
+HEALTH-V8,PROVISION,"Kept positive under the element-level rubric: the policy names a home address, but GPS coordinates and timestamps are different data elements. Under category-level scoring this depends on the rubric (see summary)."
+HEALTH-N4,WITHDRAWN,"Contradicts HEALTH-V9 on the same lines: email is sent to Mixpanel as the distinct_id, so 'identifier use only' is factually wrong."
+HEALTH-N8,WITHDRAWN,"Contradicts HEALTH-V5 on the same code (phone -> Twilio). The policy does not name Twilio, so under the project's rubric this is a positive; the caution that transmission is not proof of a breach is kept in HEALTH-V5's expected_behavior."
+HEALTH-N10,WITHDRAWN,"Contradicts HEALTH-V8 and HEALTH-V9: V9 (send_to_mixpanel, also never called) is positive, so un-invoked code must be treated the same way. Static analysis evaluates code that exists; reachability is out of scope."
+HEALTH-N6,SCOPE,Secret detection is not a PrivacyPilot output; exclude from metrics.
+HEALTH-V10,ADDED,Missing in v4: the reminder SMS body contains patient.latest_diagnosis.
+HEALTH-J1,ADDED (judgment),"PROPOSED POSITIVE. Missing in v4. Coordinates are sent to Google via requests.get; whether a geocoding API is a data processor is a legal judgment. Note: PrivacyPilot does not treat requests.get as a sink, so it will miss this case."
+HEALTH-J2,ADDED (judgment),PROPOSED POSITIVE. Depends on whether 'Improve our platform' is read as an analytics purpose.
+HEALTH-J3,ADDED (judgment),PROPOSED POSITIVE. Depends on whether 'Improve our platform' is read as an analytics purpose.
+HEALTH-J4,ADDED (judgment),PROPOSED POSITIVE. Stock vague wording.
+FIN-V5,PROVISION,Re-labelled to Section 8(2).
+FIN-V6,PROVISION,Re-labelled to Section 8(2).
+FIN-V5,FIELDS,customer.email is the first argument of analytics.track (line 17) and is transmitted to Segment.
+FIN-V6,FIELDS,customer.email is also sent (line 31).
+FIN-V2,LINES,bank_account_number is line 24; line 25 is IFSC (FIN-V3).
+FIN-V3,LINES,"IFSC is line 25 only. Same category (financial) as FIN-V2: count once if scoring is by (rule, category)."
+FIN-N5,WITHDRAWN,"Contradicts FIN-V5: customer.email is transmitted to Segment as the user id, so 'identifier use only' is factually wrong."
+FIN-V7,ADDED,Missing in v4. Category is disclosed but used for analytics; no stated purpose covers it.
+FIN-V8,ADDED,Missing in v4. Category is disclosed but used for analytics; no stated purpose covers it.
+FIN-V9,ADDED,Missing in v4. Category is disclosed but used for analytics; no stated purpose covers it.
+EDU-V3,FIELDS,"Extended to track_attendance() (lines 29-38), which also sends latitude/longitude to Mixpanel; email is the distinct_id (line 17)."
+EDU-N6,WITHDRAWN,"Duplicate of EDU-N2 (same file, same lines 9-11, same comment)."
+EDU-J1,ADDED (judgment),PROPOSED NEGATIVE for purpose linkage: 'Track your course progress' arguably covers the course_progress event. The sharing itself is covered by EDU-V3.
+COMP-N4,NOTE,"PrivacyPilot raises a medium 'processor contract unverified' item (Section 8(2)) here by design. Decide before scoring whether that item counts as a detection; if it does, it is a false positive against this negative case."

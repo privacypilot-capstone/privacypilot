@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from html import escape as _esc
 
-from database import scan_gap_categories
+from database import scan_gap_categories, violation_locations, location_label
 
 
 def _e(value) -> str:
@@ -24,11 +24,18 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
         "low":      "#28a745",
     }
 
-    # Build violations HTML
-    violations_html = ""
+    # Build violations HTML — every violation, each with every code location
+    parts = []
     for v in violations:
         color = severity_color.get(v.severity, "#666")
-        violations_html += f"""
+        locs = violation_locations(v)
+        recipient = getattr(v, "recipient", None)
+        locs_html = ""
+        if locs:
+            items = "".join(f"<li>{_e(location_label(l))}</li>" for l in locs)
+            locs_html = (f'<p><strong>Code locations ({len(locs)}):</strong></p>'
+                         f'<ol class="locs">{items}</ol>')
+        parts.append(f"""
         <div class="violation">
             <div class="violation-header">
                 <span class="section">{_e(v.dpdp_section)} — {_e(v.section_title)}</span>
@@ -36,24 +43,28 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
             </div>
             <div class="violation-body">
                 <p><strong>PII Type:</strong> {_e(v.pii_category)}</p>
+                {f'<p><strong>Recipient:</strong> {_e(recipient)}</p>' if recipient else ''}
                 <p><strong>Evidence:</strong> {_e(v.evidence)}</p>
+                {locs_html}
                 <p class="fix"><strong>Recommended Fix:</strong> {_e(v.recommendation)}</p>
             </div>
         </div>
-        """
+        """)
+    violations_html = "".join(parts)
 
-    # Build findings HTML (first 10)
-    findings_html = ""
-    for f in findings[:10]:
-        findings_html += f"""
-        <tr>
-            <td>{_e(f.pii_category)}</td>
-            <td>{_e(f.sensitivity)}</td>
-            <td>{_e(f.file_path or 'N/A')}</td>
-            <td>{_e(f.line_number or 'N/A')}</td>
-            <td>{_e(f.source)}</td>
-        </tr>
-        """
+    # Build findings HTML — EVERY finding (previously the first 10)
+    _origin = {"first_party": "Your code", "third_party": "Third-party", "generated": "Generated"}
+    rows = []
+    for i, f in enumerate(findings, 1):
+        rows.append(
+            f"<tr><td>{i}</td><td>{_e(f.pii_category)}</td><td>{_e(f.sensitivity)}</td>"
+            f"<td class=\"path\">{_e(f.file_path or 'N/A')}</td><td>{_e(f.line_number or 'N/A')}</td>"
+            f"<td>{_e(_origin.get(f.origin or 'first_party', f.origin))}</td>"
+            f"<td>{_e(f.third_party_sdk or '—')}</td>"
+            f"<td class=\"code\">{_e(f.raw_text)}</td><td>{_e(f.source)}</td></tr>"
+        )
+    findings_html = "".join(rows)
+    n_findings = len(findings)
 
     score_color = compliance.get("color", "#333")
     score       = _e(compliance.get("score_display", compliance.get("score", 0)))
@@ -170,7 +181,11 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
     background: #1a1a2e; color: #fff;
     padding: 8px 10px; text-align: left;
   }}
-  td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
+  td {{ padding: 7px 10px; border-bottom: 1px solid #eee; vertical-align: top; }}
+  td.path, td.code {{ word-break: break-all; }}
+  td.code {{ font-family: monospace; font-size: 10.5px; white-space: pre-wrap; }}
+  ol.locs {{ margin: 4px 0 8px 18px; padding: 0; font-family: monospace; font-size: 11px; }}
+  ol.locs li {{ margin: 1px 0; word-break: break-all; }}
   tr:nth-child(even) td {{ background: #f9f9f9; }}
   .footer {{
     margin-top: 32px; padding: 16px 36px;
@@ -229,17 +244,21 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
   <div class="section-title">DPDP Act Violations</div>
   {violations_html or '<p style="color:#28a745">No violations detected.</p>'}
 
-  <!-- Sample Findings -->
-  <div class="section-title">Sample Code Findings (first 10)</div>
+  <!-- All Findings -->
+  <div class="section-title">All Code Findings ({n_findings})</div>
   <table>
     <tr>
+      <th>#</th>
       <th>PII Type</th>
       <th>Sensitivity</th>
       <th>File</th>
       <th>Line</th>
+      <th>Origin</th>
+      <th>Sent to</th>
+      <th>Code</th>
       <th>Detected By</th>
     </tr>
-    {findings_html}
+    {findings_html or '<tr><td colspan="9">No findings.</td></tr>'}
   </table>
 
   <!-- Disclaimer -->

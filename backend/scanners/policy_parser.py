@@ -1059,7 +1059,9 @@ def _pass2_extract_purposes(
                     vagueness_warnings.append({
                         "pii_category": cat.value,
                         "margin":       round(margin, 4),
-                        "sentence":     quoted[:200],
+                        # the whole statement: the violation quotes it, and
+                        # the client must see which sentence to rewrite
+                        "sentence":     quoted,
                         "top_label":    best_label,
                         "top_score":    round(best_score, 4),
                     })

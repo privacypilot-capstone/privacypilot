@@ -581,6 +581,8 @@ def complete_scan(scan_id: int, policy: dict) -> dict:
                 pii_category   = v.pii_category,
                 evidence       = v.evidence,
                 recommendation = v.recommendation,
+                recipient      = getattr(v, "recipient", None),
+                locations      = json.dumps(getattr(v, "locations", None) or []),
             ))
         # The per-chunk rows have served their purpose.
         db.query(ScanChunk).filter(ScanChunk.scan_id == scan_id).delete(synchronize_session=False)

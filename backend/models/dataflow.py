@@ -36,3 +36,10 @@ class DataFlowObject(BaseModel):
     # first_party | third_party | generated — where the file came from
     # (repo_snapshot.classify_path). None for policy claims.
     origin:                  Optional[str]       = None
+    # Code-module labels of the file the finding is in (code_scanner
+    # classify_module: analytics, payment, …). None for policy claims and
+    # findings stored before this field existed.
+    module_types:            Optional[List[str]] = None
+    # For a finding inside a (possibly multi-line) sink call: the line the
+    # call starts on. Several findings in one call are one transmission.
+    call_line:               Optional[int]       = None
