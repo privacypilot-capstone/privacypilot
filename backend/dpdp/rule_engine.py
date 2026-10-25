@@ -151,10 +151,29 @@ def _origin_note(finding) -> str:
     return _ORIGIN_NOTE.get(getattr(finding, "origin", None) or "", "")
 
 
+GENERIC_SDK_LABELS = {"segment", "analytics"}
+
 # Recipient name for every local log call (print, logging, logger, log,
 # console.log): they all write to the application's own logs, so they are
 # one recipient — one violation per category, not one per log function.
 LOCAL_LOG_RECIPIENT = "application logs"
+
+
+def _is_resolved_http_recipient(label: str) -> bool:
+    """
+    A transmission counts under Section 8(2) only when the recipient is
+    known to be another organisation: a named SDK, or an HTTP call whose URL
+    resolved to a host (recipient_for_url). Two kinds of sink are NOT
+    reported as data processors:
+      - message queues (Celery, Kafka, RabbitMQ, Redis, Pub/Sub): the
+        application's own infrastructure, not a third party;
+      - HTTP calls whose URL could not be resolved statically, still labelled
+        by their client ("fetch", "axios.post", "requests.get"): most are
+        calls to the application's own back end, and the recipient is
+        unknown. The finding stays in the findings list (with its sink) for
+        review.
+    """
+    return sink_kind(label.lower()) == 'http' and label.lower() not in HTTP_LABELS
 
 
 def _is_first_party(finding) -> bool:
@@ -310,6 +329,13 @@ def run_dpdp_rules(
     violations = []
     seen = set()
 
+    # Test, mock, fixture and migration files hold sample data, not data the
+    # application processes: their findings are kept (and shown) but do not
+    # produce violations unless PRIVACYPILOT_INCLUDE_TEST_CODE=1
+    # (scanners/test_paths.py).
+    from scanners.test_paths import counts_for_rules
+    code_findings = [f for f in code_findings if counts_for_rules(f.file_path)]
+
     # ── Rule 1: Notice Gap — Section 5 + Section 6(1) ──────────────────────
     # PII is found in source code but NOT disclosed in the privacy policy.
     # Section 5 requires the data fiduciary to give notice of what data is
@@ -397,11 +423,23 @@ def run_dpdp_rules(
         if not sdk:
             continue
         if _is_logger_sink(sdk, finding.raw_text or ""):
+            # Logging inside bundled libraries and built/minified files is the
+            # library's own diagnostics, not the application logging its
+            # users' data: only the application's code counts here.
+            if not _is_first_party(finding):
+                continue
             if sdk.lower() in EXTERNAL_LOGGER_LABELS:
                 gk = ("extlog", finding.pii_category, sdk.lower())
             else:
                 gk = ("log", finding.pii_category, LOCAL_LOG_RECIPIENT)
-        elif sink_kind(sdk.lower()) in ('sdk', 'http', 'queue'):
+        elif sink_kind(sdk.lower()) == 'sdk' or _is_resolved_http_recipient(sdk):
+            # In bundled or minified code, the generic words "segment" and
+            # "analytics" match ordinary identifiers (SegmentTypes, an
+            # analytics() helper) far more often than the Segment or Google
+            # Analytics SDK; there only a resolved host or a distinctive SDK
+            # name counts.
+            if not _is_first_party(finding) and sdk.lower() in GENERIC_SDK_LABELS:
+                continue
             gk = ("xmit", finding.pii_category, sdk)
         else:
             continue
@@ -676,13 +714,15 @@ def run_dpdp_rules(
             stmts: dict[str, dict] = {}
             for w in ws:
                 k = " ".join((w.get("sentence") or "").split()).lower()
-                if k not in stmts or w.get("margin", 1.0) < stmts[k].get("margin", 1.0):
+                mw = w.get("margin") if w.get("margin") is not None else -1.0
+                ms = stmts[k].get("margin") if k in stmts and stmts[k].get("margin") is not None else -1.0
+                if k not in stmts or mw < ms:
                     stmts[k] = w
             ordered = sorted(stmts.values(),
                              key=lambda x: (x.get("statement_no") is None, x.get("statement_no") or 0))
             locs = [{"policy": x.get("policy_url"), "statement": x.get("statement_no"),
                      "text": (x.get("sentence") or "").strip()} for x in ordered]
-            worst = min(ordered, key=lambda x: x.get("margin", 1.0))
+            worst = min(ordered, key=lambda x: x.get("margin") if x.get("margin") is not None else -1.0)
             n = len(ordered)
             if n == 1:
                 _sentence = (worst.get("sentence") or "").strip()
@@ -704,11 +744,15 @@ def run_dpdp_rules(
                 severity="low",
                 pii_category=cat,
                 evidence=(
-                    f"{what}: the classifier margin between the top-2 purpose "
-                    f"categories is {worst.get('margin', 0):.3f}"
-                    f"{' at its smallest' if n > 1 else ''} (threshold 0.08), "
-                    f"closest to '{worst.get('top_label', 'unknown')}'. Rule "
-                    f"3(b)(ii) of DPDP Rules 2025 requires the notice to state "
+                    f"{what}: "
+                    + (f"it uses stock wording that names no specified purpose "
+                       f"(e.g. 'improve our services', 'business purposes')"
+                       if worst.get("margin") is None else
+                       f"the classifier margin between the top-2 purpose "
+                       f"categories is {worst.get('margin', 0):.3f}"
+                       f"{' at its smallest' if n > 1 else ''} (threshold 0.08), "
+                       f"closest to '{worst.get('top_label', 'unknown')}'")
+                    + f". Rule 3(b)(ii) of DPDP Rules 2025 requires the notice to state "
                     f"the specified purpose in clear and plain language.{quote}"
                 ),
                 recommendation=(

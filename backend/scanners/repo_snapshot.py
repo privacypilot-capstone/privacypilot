@@ -47,7 +47,11 @@ from scanners.code_scanner import SCAN_EXTS
 #   third_party  bundled dependencies (node_modules/, vendor/, site-packages/ ...)
 #   generated    build output (dist/, build/, *.min.js, *.bundle.js ...)
 THIRD_PARTY_DIRS = {"node_modules", "vendor", "site-packages", "bower_components",
-                    ".venv", "venv", "third_party", "third-party", "external"}
+                    ".venv", "venv", "third_party", "third-party", "external",
+                    # copied-in libraries: "libs" / "vendors" folders, JSPM and
+                    # CocoaPods packages (a project's own code lives in lib/ or
+                    # src/, which stay first-party)
+                    "libs", "vendors", "jspm_packages", "Pods"}
 GENERATED_DIRS = {"dist", "build", ".next", "coverage", "out"}
 GENERATED_SUFFIXES = (".min.js", ".bundle.js")
 # Not code at all: type declarations contain no executable statements, and
@@ -98,7 +102,8 @@ def classify_path(path: str) -> str:
     # Third-party wins over generated: node_modules/x/dist/a.js is a dependency.
     if any(p in THIRD_PARTY_DIRS for p in dirs):
         return "third_party"
-    if any(p in GENERATED_DIRS for p in dirs) or path.endswith(GENERATED_SUFFIXES):
+    if (any(p in GENERATED_DIRS for p in dirs) or path.endswith(GENERATED_SUFFIXES)
+            or ".min." in parts[-1]):           # script.min.1.1.js, app.min.v2.js
         return "generated"
     return "first_party"
 

@@ -166,10 +166,11 @@ def test_D4_D6_python_sinks_raise_the_right_rule():
     v = run_dpdp_rules(f, f, set())
     secs = sections(v)
     assert "Section 8(5)" in secs                 # print / logger
-    assert "Section 8(2)" in secs     # requests / kafka / celery
-    sdks = {v_.evidence.split("transmitted to '")[1].split("'")[0]
-            for v_ in v if v_.dpdp_section == "Section 8(2)"}
-    assert {"requests.post", "kafka", "celery"} <= sdks
+    # Queues (kafka, celery) are the application's own infrastructure and
+    # requests.post with an unresolved URL has no known recipient: the
+    # findings keep their sinks, but none is a Section 8(2) violation.
+    assert {"requests.post", "kafka", "celery"} <= {x.third_party_sdk for x in f}
+    assert "Section 8(2)" not in secs
 
 
 def test_D4_js_http_sinks_raise_rule_2a():
@@ -364,8 +365,8 @@ def test_rule_2_disclosed_sdk_is_downgraded_to_8_2_medium():
 
 
 def test_rule_2_http_sink_is_never_treated_as_disclosed():
-    f = [finding(P.EMAIL, "requests.post", "requests.post(URL, json=email)")]
-    v = run_dpdp_rules(f, f, set(), disclosed_sdks={P.EMAIL: {"requests.post"}})
+    f = [finding(P.EMAIL, "api.example.com", "requests.post(URL, json=email)")]
+    v = run_dpdp_rules(f, f, set(), disclosed_sdks={P.EMAIL: {"api.example.com"}})
     assert [(x.dpdp_section, x.section_title, x.severity) for x in v] == \
         [("Section 8(2)", "Third-Party Transmission — Undisclosed Data Processor", "high")]
 
@@ -427,7 +428,7 @@ def test_A3_trailing_comment_is_not_pii(path, src):
 # ── A4: '//' and '#' inside string literals are not comments ──────────────────
 
 def test_A4_js_url_in_string_does_not_hide_sink():
-    f, _ = scan("a.js", 'const u = "https://example.com/address"; console.log(u)\n')
+    f, _ = scan("a.js", 'const u = "https://example.com/"; console.log(address)\n')
     assert any(x.pii_category == P.LOCATION and x.third_party_sdk == "console.log" for x in f)
 
 
@@ -1883,3 +1884,94 @@ def test_R6_every_vague_statement_is_kept_not_only_the_worst_per_category(monkey
     _, vw = pp._pass2_extract_purposes(text.lower(), {P.EMAIL}, full_text_raw=text)
     assert len(vw) == 2
     assert sorted(w["statement_no"] for w in vw) == [1, 2]
+
+
+
+# ── I: improvements from the real-world reference set ────────────────────────
+
+def test_I1_test_code_does_not_produce_violations(monkeypatch):
+    from scanners.test_paths import is_test_path
+    assert is_test_path("tests/test_client.py") and is_test_path("src/_tests_/a.test.ts")
+    assert is_test_path("src/app/x.component.spec.ts") and is_test_path("a/b-spec.data.ts")
+    assert not is_test_path("src/latest.ts") and not is_test_path("examples/index.js")
+    f = [finding(P.AADHAAR, None, "x", "tests/test_customer.py", 3)]
+    assert run_dpdp_rules(f, [], {P.AADHAAR}) == []
+    monkeypatch.setenv("PRIVACYPILOT_INCLUDE_TEST_CODE", "1")
+    assert [v.dpdp_section for v in run_dpdp_rules(f, [], {P.AADHAAR})] == ["Section 5 / Section 6(1)"]
+
+
+def test_I2_queues_and_unresolved_calls_are_not_processors():
+    for sink in ("celery", "kafka", "fetch", "axios.post", "requests.get"):
+        assert run_dpdp_rules([finding(P.EMAIL, sink, "x")], [], set()) == [], sink
+    v = run_dpdp_rules([finding(P.EMAIL, "api.partner.com", "x")], [], set())
+    assert [x.recipient for x in v] == ["api.partner.com"]
+
+
+def test_I3_new_sinks_are_recognised():
+    assert canonical_sink("client = vision.ImageAnnotatorClient()") == "google-cloud-vision"
+    assert canonical_sink("FCMPlugin.subscribeToTopic(district)") == "firebase"
+    assert canonical_sink("s3.put_object(Bucket=b, Body=doc)") == "aws-s3"
+    from scanners.sinks import recipient_for_url
+    assert recipient_for_url("https://vision.googleapis.com/v1/images:annotate") == "google-cloud-vision"
+    for lbl in ("google-cloud-vision", "aws-s3", "azure-blob", "gcs"):
+        assert sink_kind(lbl) == "sdk"
+    # sign-in SDKs and reCAPTCHA are not sinks (data comes from them / only a token goes)
+    assert canonical_sink("grecaptcha.execute(key)") is None
+
+
+def test_I4_router_location_ip_address_and_health_checks_are_not_pii():
+    norm = lambda t: [c.value for c in cs._pass1_categories(cs._normalise_identifiers(t))]
+    assert norm("this.location.back()") == [] and norm("window.location.href = u") == []
+    assert norm("const ipAddress = req.ip") == [] and norm('app.get("/health", h)') == []
+    assert norm("healthCheckService.check()") == []
+    assert norm("user.location = loc") == ["location"] and norm("patient.health_record") == ["health"]
+    assert norm("yearOfBirth = 1990") == ["date_of_birth"]
+
+
+def test_I5_log_message_text_is_not_logged_data():
+    f, _ = scan("a.js", 'console.log("email sent");\nconsole.log("found", email);\n')
+    assert [(x.line_number, x.pii_category) for x in f if x.third_party_sdk == "console.log"] == [(2, P.EMAIL)]
+
+
+def test_I6_vague_purpose_detection():
+    assert pp.is_stock_vague("We use your information to: Improve our platform")
+    assert not pp._is_vague_wording("We use your information to: Provide personalised learning experiences")
+    terms = ("By accessing or Using the Website and/or providing your information, you are accepting "
+             "the terms of our Privacy Policy and consent to the collection and use of the information")
+    assert not pp.is_stock_vague(terms) and not pp._is_vague_wording(terms)
+    assert pp._is_vague_wording("We use your data to provide, personalise and market our services")
+
+
+def test_I7_stock_vague_statement_states_no_purpose(monkeypatch):
+    monkeypatch.setattr(pp, "_get_nlp", lambda: None)
+    monkeypatch.setattr(pp, "_get_st_model", lambda: (None, None))
+    text = "We use your email address to improve our platform."
+    purpose_map, vague = pp._pass2_extract_purposes(text.lower(), {P.EMAIL}, full_text_raw=text)
+    assert P.EMAIL not in purpose_map                      # no stated purpose
+    assert [w["pii_category"] for w in vague] == ["email"] and vague[0]["margin"] is None
+    v = run_dpdp_rules([], [], set(), vagueness_warnings=vague)
+    assert "stock wording" in v[0].evidence
+
+
+def test_I8_vendored_libraries_and_parse_artefacts_do_not_log_user_data():
+    from scanners.repo_snapshot import classify_path
+    assert classify_path("src/assets/libs/semantic.min.js") != "first_party"
+    assert classify_path("plugins/x/renderer/libs/pdf.worker.js") == "third_party"
+    assert classify_path("lib/razorpay.js") == "first_party"
+    f = finding(P.EMAIL, "console.log", "x", "vendor/x.js", 1); f.origin = "third_party"
+    assert run_dpdp_rules([f], [], set()) == []
+    assert list(cs._sink_lines("console.log", 10, 40)) == [10]
+    assert list(cs._sink_lines("console.log", 10, 12)) == [10, 11, 12]
+    assert list(cs._sink_lines("mixpanel", 10, 40)) == list(range(10, 41))
+
+
+def test_I9_device_fingerprint_dea_numbers_and_generic_sdk_words_in_bundles():
+    norm = lambda t: [c.value for c in cs._pass1_categories(cs._normalise_identifiers(t))]
+    assert norm("private fingerprintInfo: any;") == [] and norm("fingerprint_hash = x") == ["biometric"]
+    assert "MEDICAL_LICENSE" not in cs.PRESIDIO_MAP
+    from scanners.repo_snapshot import classify_path
+    assert classify_path("public/preview/script.min.1.1.js") == "generated"
+    f = finding(P.NAME, "segment", "x", "libs/pdf.worker.js", 1); f.origin = "third_party"
+    assert run_dpdp_rules([f], [], set()) == []
+    g = finding(P.NAME, "mixpanel", "x", "vendor/sdk.js", 1); g.origin = "third_party"
+    assert [v.recipient for v in run_dpdp_rules([g], [], set())] == ["mixpanel"]

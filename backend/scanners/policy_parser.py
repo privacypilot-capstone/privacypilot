@@ -462,14 +462,67 @@ _VAGUE_PHRASE_RE = re.compile(
 )
 
 
+# Clauses that are not purpose statements at all: acceptance of terms,
+# consent boilerplate, statements about the policy itself. They often score
+# ambiguously against every purpose (they name none), which made the
+# classifier flag e.g. "By accessing the Website ... you are accepting the
+# terms of our Privacy Policy ... and consent to the collection and use of
+# the information ..." as a vague purpose.
+_NOT_PURPOSE_STATEMENT_RE = re.compile(
+    r"\b(?:accept(?:s|ing|ed)?|agree(?:s|ing|d)?\s+to)\s+(?:the\s+|these\s+|our\s+)?terms"
+    r"|\bby\s+(?:accessing|using|visiting|browsing|registering|continuing)\b"
+    r"|\blegally\s+(?:competent|binding)\b"
+    r"|\b(?:this|our|the)\s+privacy\s+(?:policy|notice)\s+(?:applies|describes|explains|sets\s+out|governs|may\s+be\s+(?:updated|changed|amended))"
+    r"|\bwe\s+(?:may|reserve\s+the\s+right\s+to)\s+(?:update|change|amend|modify)\s+(?:this|our)\b",
+    re.I,
+)
+# Purpose statements describe a use: "we use / process / share / collect …
+# to …", or a bullet under such a lead-in.
+_USE_STATEMENT_RE = re.compile(
+    r"\b(?:use|uses|used|using|process|processes|processed|processing|share|shares|shared"
+    r"|sharing|disclose|discloses|disclosed|collect|collects|collected|collecting|retain|store"
+    r"|stores|stored)\b", re.I)
+VAGUE_MAX_WORDS = 40
+
+
+def is_stock_vague(sentence: str) -> bool:
+    """A purpose statement that uses stock vague wording ("improve our
+    services", "business purposes", "legitimate interests" …). Such wording
+    states no specified purpose, so it is vague whatever the classifier says,
+    and it does not count as stating any purpose (see Pass 2)."""
+    if sentence.rstrip().endswith(':') or _NOT_PURPOSE_STATEMENT_RE.search(sentence):
+        return False
+    return bool(_PURPOSE_MARKER_RE.search(sentence) and _VAGUE_PHRASE_RE.search(sentence))
+
+
 def _is_vague_wording(sentence: str) -> bool:
+    """
+    Whether a unit whose classifier margin is narrow is a vague purpose
+    statement. Stock vague wording always is. Otherwise the unit must be a
+    short purpose statement (a use verb, a purpose marker, at most
+    VAGUE_MAX_WORDS words — long policy sentences listing several specific
+    purposes are not vague) whose purpose part coordinates two or more
+    purpose categories in one breath ("to provide and personalise").
+    """
     # A list lead-in ("We use your information to:") is an unfinished
     # sentence; its bullets (each prefixed with it) carry the purposes.
     if sentence.rstrip().endswith(':'):
         return False
-    if not _PURPOSE_MARKER_RE.search(sentence):
+    if _NOT_PURPOSE_STATEMENT_RE.search(sentence) or not _PURPOSE_MARKER_RE.search(sentence):
         return False
-    return len(_keyword_purposes(sentence)) >= 2 or bool(_VAGUE_PHRASE_RE.search(sentence))
+    if _VAGUE_PHRASE_RE.search(sentence):
+        return True
+    if len(sentence.split()) > VAGUE_MAX_WORDS or not _USE_STATEMENT_RE.search(sentence):
+        return False
+    # Several purposes named in one breath ("to provide, personalise and
+    # market"): the purpose part must coordinate two or more of them. One
+    # verb phrase ("Provide personalised learning experiences") is a single
+    # specific purpose even if its words touch two keyword lists.
+    m = _PURPOSE_MARKER_RE.search(sentence)
+    part = sentence[m.end():] if m else sentence
+    if not re.search(r"\b(?:and|or)\b|,|/", part):
+        return False
+    return len(_keyword_purposes(part)) >= 2
 
 # ── Lazy-loaded NLP models ────────────────────────────────────────────────────
 
@@ -1046,6 +1099,23 @@ def _pass2_extract_purposes(
             sent = _affirmative_part(quoted).strip()
             if len(sent) < 10:
                 continue
+            # Stock vague wording ("Improve our platform", "to provide and
+            # improve our services") states no specified purpose: it is
+            # reported as vague whether or not the classifier is available,
+            # and the purposes it seems to name are NOT added to purpose_map
+            # (otherwise "improve our platform" made analytics use look
+            # disclosed and hid a Rule 3 violation).
+            if is_stock_vague(sent):
+                vagueness_warnings.append({
+                    "pii_category": cat.value,
+                    "margin":       None,
+                    "sentence":     quoted,
+                    "statement_no": statement_no.get(quoted),
+                    "top_label":    None,
+                    "top_score":    None,
+                    "reason":       "stock vague wording",
+                })
+                continue
             # ── spaCy dependency pass ──────────────────────────────────────
             if nlp:
                 spacy_results = _spacy_extract_purposes([sent], nlp)
@@ -1088,7 +1158,8 @@ def _pass2_extract_purposes(
     deduped: dict[tuple, dict] = {}
     for w in vagueness_warnings:
         k = (" ".join((w.get("sentence") or "").split()).lower(), w["pii_category"])
-        if k not in deduped or w["margin"] < deduped[k]["margin"]:
+        m = w["margin"] if w.get("margin") is not None else -1.0
+        if k not in deduped or m < (deduped[k]["margin"] if deduped[k].get("margin") is not None else -1.0):
             deduped[k] = w
     vagueness_warnings = list(deduped.values())
 

@@ -76,12 +76,21 @@ PII_PATTERNS = {
     PIICategory.PHONE:     r'phone_number|mobile_number|contact_number|mobile_no|phone_no|phone|mobile',
     PIICategory.EMAIL:     r'email_address|user_email|email_id|email',
     # lat / lng / latlng: the usual short names of coordinates (latLng → lat_lng)
-    PIICategory.LOCATION:  r'latitude|longitude|latlng|lat|lng|location|gps|address',
-    PIICategory.HEALTH:    r'blood_group|health(?!_?(?:check|z|endpoint|status))|medical|diagnosis|disease',
+    # 'location' is also the browser / router location object
+    # (window.location.href, this.location.back()) and 'address' an IP, MAC
+    # or server address: those are not a person's location.
+    PIICategory.LOCATION:  (r'latitude|longitude|latlng|lat|lng|gps'
+                            r'|(?<!window\.)(?<!document\.)location(?!\s*\.\s*(?:href|back|forward|go|path|pathname|reload|replace|hash|search|origin|host|hostname|protocol|assign|port)\b)(?!_?(?:strategy|service|href|path|change|state|listener))'
+                            r'|(?<!ip_)(?<!mac_)(?<!server_)(?<!host_)(?<!remote_)(?<!base_)(?<!socket_)(?<!wallet_)address'),
+    # 'health' as in health checks, health endpoints and liveness probes is
+    # service monitoring, not health data.
+    PIICategory.HEALTH:    r'blood_group|(?<!/)(?<!service_)(?<!server_)(?<!system_)(?<!app_)health(?!_?(?:check|z|endpoint|status|probe|ping|service|monitor|route|url|api|handler))|medical|diagnosis|disease',
     PIICategory.FINANCIAL: r'bank_account|account_no|ifsc|credit_card|salary',
     PIICategory.NAME:      r'full_name|first_name|last_name|username',
-    PIICategory.DOB:       r'date_of_birth|birth_date|birthdate|dob',
-    PIICategory.BIOMETRIC: r'fingerprint|iris|face_id|biometric',
+    PIICategory.DOB:       r'date_of_birth|birth_date|birthdate|dob|year_of_birth|birth_year|yob',
+    # A browser / device fingerprint (fingerprint_info, fingerprintjs) is a
+    # device identifier, not a biometric.
+    PIICategory.BIOMETRIC: r'(?<!device_)(?<!browser_)fingerprint(?!_?(?:info|details?|js|2|components?|v1|v2|id))|iris|face_id|biometric',
 }
 _TOKEN_L = r'(?<![a-z0-9])'
 _TOKEN_R = r'(?![a-z0-9])'
@@ -99,6 +108,21 @@ def _normalise_identifiers(line: str) -> str:
     line = _CAMEL_RE_2.sub(r'\1_\2', line)
     line = _CAMEL_RE_1.sub(r'\1_\2', line)
     return line.lower()
+
+
+_STR_LIT_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`')
+_INTERP_RE = re.compile(r'\$\{([^}]*)\}|\{([^{}]*)\}')
+
+
+def _blank_string_literals(code: str) -> str:
+    """Replace the text of string literals with nothing, keeping template /
+    f-string interpolations (`${email}`, f"{user.email}") because those are
+    values written into the string."""
+    def repl(m):
+        lit = m.group(0)
+        keep = " ".join(a or b for a, b in _INTERP_RE.findall(lit)) if lit[0] in "`\"'" else ""
+        return '""' + ((" " + keep) if keep else "")
+    return _STR_LIT_RE.sub(repl, code)
 
 
 def _pass1_categories(norm_line: str) -> list[PIICategory]:
@@ -290,7 +314,10 @@ PRESIDIO_MAP = {
     "PAN":              (PIICategory.PAN,       Sensitivity.SENSITIVE),
     "IN_PAN":           (PIICategory.PAN,       Sensitivity.SENSITIVE),
     "LOCATION":         (PIICategory.LOCATION,  Sensitivity.PERSONAL),
-    "MEDICAL_LICENSE":  (PIICategory.HEALTH,    Sensitivity.SENSITIVE),
+    # MEDICAL_LICENSE is not mapped: Presidio's recogniser is for US DEA
+    # registration numbers (two letters + seven digits), which in Indian code
+    # matched document numbers ("AD0725981") and ids, and was reported as
+    # health data.
 }
 
 
@@ -663,6 +690,20 @@ def _rank(label: str) -> int:
     return _KIND_RANK.get(sink_kind(label), 9)
 
 
+# A log call is normally a line or a few. A "log call" spanning dozens of
+# lines is almost always a parse artefact (TypeScript read with the
+# JavaScript grammar: error recovery can make one console.error(...) appear
+# to enclose a whole method), and attributing every line in it to the logger
+# reported ordinary code as logged data.
+MAX_LOGGER_CALL_LINES = 12
+
+
+def _sink_lines(label: str, start: int, end: int) -> range:
+    if sink_kind(label) == 'logger' and end - start + 1 > MAX_LOGGER_CALL_LINES:
+        return range(start, start + 1)
+    return range(start, end + 1)
+
+
 class _LineSinks(dict):
     """{line → sink label} for every line inside a sink call, plus
     `call_line`: {line → the line that call starts on}. A multi-line call is
@@ -703,7 +744,7 @@ def _python_call_sinks(source_text: str) -> dict[int, str] | None:
         label = _python_call_label(node, aliases, constants)
         if not label:
             continue
-        for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+        for ln in _sink_lines(label, node.lineno, node.end_lineno or node.lineno):
             by_line.offer(ln, label, node.lineno)
     return by_line
 
@@ -931,7 +972,7 @@ def _js_call_sinks(source_text: str) -> dict[int, str] | None:
                                _js_url_of(node.child_by_field_name("arguments"), src, consts))
         if not label:
             continue
-        for ln in range(node.start_point[0] + 1, node.end_point[0] + 2):
+        for ln in _sink_lines(label, node.start_point[0] + 1, node.end_point[0] + 1):
             by_line.offer(ln, label, node.start_point[0] + 1)
     return by_line
 
@@ -1133,7 +1174,12 @@ def _scan_single_file(
                          else canonical_sink(code_part))
 
             # ── Pass 1: regex on normalised identifiers ───────────────
-            categories = _pass1_categories(_normalise_identifiers(code_part))
+            # In a log call, a PII word that is only part of the message
+            # text ("email sent", 'location updated') logs no personal
+            # data; only identifiers and interpolated expressions count.
+            _p1_text = (_blank_string_literals(code_part)
+                        if line_sink and sink_kind(line_sink) == 'logger' else code_part)
+            categories = _pass1_categories(_normalise_identifiers(_p1_text))
             if PIICategory.AADHAAR in categories and not _validate_aadhaar(code_part):
                 categories.remove(PIICategory.AADHAAR)   # Verhoeff fails — skip
 
@@ -1145,7 +1191,11 @@ def _scan_single_file(
             # Skipped for bare field/schema declarations (no literal content
             # for NER to analyze — see _BARE_FIELD_DECL_RE above).
             if not categories and len(code_stripped) > 10 and not _BARE_FIELD_DECL_RE.match(code_part):
-                _pass2_pending.append((line_num, line, code_part, line_sink))
+                # Pass 2 (NER) reads literals; in a log call the literal is the
+                # message ("Max retries exceeded" is not a person), and sample
+                # values printed by example programs are not user data.
+                if len(_p1_text.strip()) > 10:
+                    _pass2_pending.append((line_num, line, _p1_text, line_sink))
 
         # ── Pass 2: one batched Presidio call for the whole file ──────
         _lang = 'py' if is_py else 'js'
@@ -1253,6 +1303,7 @@ def scan_files(reader, paths: list[str]) -> tuple[list, dict, dict]:
     reported but kept apart where the rules need the application's own code.
     """
     from scanners.repo_snapshot import RateLimited, classify_path
+    from scanners.test_paths import counts_for_rules
 
     findings: list = []
     usage_map: dict = {}
@@ -1272,7 +1323,7 @@ def scan_files(reader, paths: list[str]) -> tuple[list, dict, dict]:
         for f in file_findings:
             f.origin = origin
         findings.extend(file_findings)
-        if origin == "first_party":
+        if origin == "first_party" and counts_for_rules(path):
             for cat, mods in file_usage.items():
                 usage_map.setdefault(cat, set()).update(mods)
         status["scanned"].append(path)

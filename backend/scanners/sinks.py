@@ -45,6 +45,16 @@ SDK_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(_L + r'analytics\s*[.(]', re.I), 'analytics'),
     (re.compile(_L + r'twilio', re.I),      'twilio'),
     (re.compile(_L + r'sendgrid', re.I),    'sendgrid'),
+    # Cloud OCR, push messaging and storage services (found while reviewing
+    # real repositories): identity-document images, push topics and uploaded
+    # files leave the application through them. (Sign-in SDKs such as Google
+    # or Apple sign-in and reCAPTCHA are not sinks: the user's data comes FROM
+    # them, or only a token is sent.)
+    (re.compile(_L + r'(?:ImageAnnotatorClient|google-cloud/vision|cloud\s+import\s+vision|vision\.googleapis)', re.I), 'google-cloud-vision'),
+    (re.compile(_L + r'(?:FCMPlugin|FirebaseMessaging|getMessaging\s*\()', re.I), 'firebase'),
+    (re.compile(_L + r'(?:S3Client|PutObjectCommand|put_object\s*\(|upload_fileobj\s*\(|aws-sdk/client-s3)', re.I), 'aws-s3'),
+    (re.compile(_L + r'(?:BlobServiceClient|uploadBlockBlob|BlockBlobClient)', re.I), 'azure-blob'),
+    (re.compile(_L + r'(?:google-cloud/storage|storage\s*\.\s*Client\s*\()', re.I), 'gcs'),
 ]
 
 # ── Outbound HTTP (Rule 2a) ──────────────────────────────────────────────────
@@ -134,6 +144,11 @@ HOST_SDK: dict[str, str] = {
     'twilio.com':                'twilio',
     'sendgrid.com':              'sendgrid',
     'sendgrid.net':              'sendgrid',
+    'vision.googleapis.com':     'google-cloud-vision',
+    'fcm.googleapis.com':        'firebase',
+    's3.amazonaws.com':          'aws-s3',
+    'blob.core.windows.net':     'azure-blob',
+    'storage.googleapis.com':    'gcs',
 }
 _HOST_LABEL_RE = re.compile(r'^(?=.{1,253}$)[a-z0-9-]+(?:\.[a-z0-9-]+)+$')
 
@@ -204,6 +219,10 @@ SDK_DISCLOSURE_PATTERNS: dict[str, re.Pattern] = {
     'analytics':   re.compile(r'\b(?:google|firebase|adobe)\s+analytics\b'),
     'twilio':      re.compile(r'\btwilio\b'),
     'sendgrid':    re.compile(r'\bsendgrid\b'),
+    'google-cloud-vision': re.compile(r'\b(?:google\s+)?cloud\s+vision\b|\bvision\s+api\b'),
+    'aws-s3':      re.compile(r'\b(?:amazon\s+s3|aws\s+s3|amazon\s+web\s+services)\b'),
+    'azure-blob':  re.compile(r'\b(?:microsoft\s+)?azure\b'),
+    'gcs':         re.compile(r'\bgoogle\s+cloud(?:\s+storage|\s+platform)?\b'),
     # external logging / monitoring services (EXTERNAL_LOGGER_LABELS)
     'sentry':      re.compile(r'\bsentry\b'),
     'datadog':     re.compile(r'\bdatadog\b'),

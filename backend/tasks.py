@@ -578,7 +578,10 @@ def complete_scan(scan_id: int, policy: dict) -> dict:
         # collects them. Rule 2 (third-party transmission) gets every finding,
         # third-party code included (see dpdp/rule_engine.py). usage_map
         # (Rule 3) is built from first-party files only by the scanner.
-        code_pii       = {f.pii_category for f in first_party}
+        # Test, mock and fixture files do not create consent gaps
+        # (scanners/test_paths.py).
+        from scanners.test_paths import counts_for_rules
+        code_pii       = {f.pii_category for f in first_party if counts_for_rules(f.file_path)}
         policy_pii     = {f.pii_category for f in policy_claims}
         gap_categories = code_pii - policy_pii
 

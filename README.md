@@ -17,6 +17,8 @@ Each violation is reported once per check and data category (third-party and log
 
 Nothing is truncated in the outputs: the results page lists every violation with all its code locations and pages through every finding (50/200/500 per page); the HTML and PDF reports (`/report/{id}`, `?format=pdf`) list every violation, location and finding; and `/scans/{id}/violations.csv` and `/scans/{id}/findings.csv` export them all. Stored code lines are cut only above 1,000 characters (minified code), marked with "…".
 
+What does not produce violations (findings are still listed): code in test, mock, fixture and migration files (set `PRIVACYPILOT_INCLUDE_TEST_CODE=1` to include it); message queues (Celery, Kafka, RabbitMQ, Redis, Pub/Sub), which are the application's own infrastructure; HTTP calls whose URL cannot be resolved statically; logging inside bundled libraries and minified files; and, in bundled code, the generic SDK words "segment" and "analytics". Purpose statements with stock vague wording ("improve our services") are reported as vague and do not count as stating a purpose.
+
 Severity tiers (Aadhaar, PAN, health, financial and biometric data are treated as "critical") are a design choice of this project; the Act itself does not define a sensitive-data class. This tool is a research prototype and does not give legal advice.
 
 ## Setup
