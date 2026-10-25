@@ -32,6 +32,11 @@ function scoreRating(score) {
 
 // Same wording as the backend's location labels (database.location_label).
 function locationLabel(l) {
+  if ('policy' in l) {   // a statement in the privacy policy (vague purpose)
+    let p = l.policy ? `privacy policy (${l.policy})` : 'privacy policy';
+    if (l.statement) p += `, statement ${l.statement}`;
+    return l.text ? `${p}: "${l.text}"` : p;
+  }
   let s = `${l.file || 'unknown file'} line ${l.line}`;
   if (l.sinks && l.sinks.length)     s += ` (${l.sinks.join(', ')})`;
   if (l.modules && l.modules.length) s += ` (module: ${l.modules.join(', ')})`;
@@ -74,7 +79,7 @@ function ViolationCard({ v }) {
           </div>
           {v.locations && v.locations.length > 0 && (
             <div className="v-detail-row">
-              <div className="v-detail-label">Code locations ({v.locations.length})</div>
+              <div className="v-detail-label">Locations ({v.locations.length})</div>
               <ol className="v-detail-value mono" style={{ margin: 0, paddingLeft: 22, fontSize: 12, wordBreak: 'break-all' }}>
                 {v.locations.map((l, i) => <li key={i}>{locationLabel(l)}</li>)}
               </ol>

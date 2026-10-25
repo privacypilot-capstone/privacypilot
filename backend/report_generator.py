@@ -33,7 +33,7 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
         locs_html = ""
         if locs:
             items = "".join(f"<li>{_e(location_label(l))}</li>" for l in locs)
-            locs_html = (f'<p><strong>Code locations ({len(locs)}):</strong></p>'
+            locs_html = (f'<p><strong>Locations ({len(locs)}):</strong></p>'
                          f'<ol class="locs">{items}</ol>')
         parts.append(f"""
         <div class="violation">

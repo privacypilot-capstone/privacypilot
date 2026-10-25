@@ -111,7 +111,8 @@ def _scan_context_text(scan_data: dict) -> str:
             # Model context only (the reports list every location); capped
             # so a violation with thousands of locations cannot crowd out
             # the rest of the prompt.
-            shown = "; ".join(f"{l.get('file')}:{l.get('line')}" for l in locs[:_MAX_LOCS])
+            from database import location_short
+            shown = "; ".join(location_short(l) for l in locs[:_MAX_LOCS])
             more = f" … and {len(locs) - _MAX_LOCS} more" if len(locs) > _MAX_LOCS else ""
             lines.append(f"  Locations ({len(locs)}): {shown}{more}")
         lines.append(f"  Recommendation: {v.get('recommendation', '')}")

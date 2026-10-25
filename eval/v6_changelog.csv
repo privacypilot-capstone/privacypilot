@@ -1,0 +1,14 @@
+﻿case_id,change_type,details
+DP-V5,DECIDED,Negative: Aadhaar -> UIDAI is not a third-party processor transfer (UIDAI is the verifying authority). The Aadhaar notice gap is DP-V10.
+COMP-N4,DECIDED,"Negative control; the ""processor contract unverified"" item PrivacyPilot raises here is COUNTED as a detection, i.e. a false positive (--contract-unverified count)."
+HEALTH-V8,DECIDED,Positive: GPS coordinates are a different data item from the disclosed home address (element-level rubric).
+DP-J1,DECIDED,"Positive: ""provide and improve our services"" does not state a specific analytics purpose."
+DP-J2,DECIDED,"Positive: ""provide and improve our services"" does not state a specific analytics purpose."
+DP-J3,DECIDED,"Positive: vague purpose. Scored one entry per category covered (name, email, phone)."
+HEALTH-J1,DECIDED,Positive: coordinates sent to the Google Maps geocoding API are a third-party transfer.
+HEALTH-J2,DECIDED,"Positive: ""Improve our platform"" does not state a specific analytics purpose."
+HEALTH-J3,DECIDED,"Positive: ""Improve our platform"" does not state a specific analytics purpose."
+HEALTH-J4,DECIDED,"Positive: vague purpose. Scored one entry per category covered (name, email, phone, location)."
+EDU-J1,DECIDED,"Positive: the policy does not state which third-party tool receives the course-progress data. Scored one entry per category (name, email, phone)."
+(no case),UNLISTED FALSE POSITIVE,"edtech-demo: Vague Purpose Statement for email, name, phone on policy statement 9 ""We use your information to: Provide personalised learning experiences"" (scan 34). No ground-truth case lists it; counted as 3 false positives."
+(all),NEW COLUMNS,"v6_decision (team decision text) and v6_scan_outcome_2026_10_23 (outcome per case from scans 33-37, scored with eval/ground_truth.json and --contract-unverified count)."

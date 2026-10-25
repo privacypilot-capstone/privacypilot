@@ -1014,7 +1014,13 @@ def _pass2_extract_purposes(
     # the same text before lower-casing; whitespace is collapsed the same way
     # fetch_policy_text() does for the lower-cased copy.
     _source = full_text_raw if full_text_raw is not None else full_text_lower
-    raw_sentences = [s for s in _policy_units(_source) if len(s) > 15]
+    _units = _policy_units(_source)
+    raw_sentences = [s for s in _units if len(s) > 15]
+    # Where each statement is in the policy (1-based position among the
+    # policy's statements), so a vague-purpose violation can say where.
+    statement_no: dict[str, int] = {}
+    for i, unit in enumerate(_units, 1):
+        statement_no.setdefault(unit, i)
 
     # Which PII categories each sentence names — same whole-word, longest-
     # phrase matcher as Pass 1 (on the lower-cased sentence), so Pass 2
@@ -1062,6 +1068,7 @@ def _pass2_extract_purposes(
                         # the whole statement: the violation quotes it, and
                         # the client must see which sentence to rewrite
                         "sentence":     quoted,
+                        "statement_no": statement_no.get(quoted),
                         "top_label":    best_label,
                         "top_score":    round(best_score, 4),
                     })
@@ -1075,10 +1082,12 @@ def _pass2_extract_purposes(
         if cat_purposes:
             purpose_map[cat] = cat_purposes
 
-    # Deduplicate vagueness warnings (keep worst margin per PII category)
-    deduped: dict[str, dict] = {}
+    # Deduplicate vagueness warnings: one per (statement, PII category).
+    # (It used to keep only the worst statement per category, so a second
+    # vague statement about the same data was never reported.)
+    deduped: dict[tuple, dict] = {}
     for w in vagueness_warnings:
-        k = w["pii_category"]
+        k = (" ".join((w.get("sentence") or "").split()).lower(), w["pii_category"])
         if k not in deduped or w["margin"] < deduped[k]["margin"]:
             deduped[k] = w
     vagueness_warnings = list(deduped.values())
@@ -1202,6 +1211,8 @@ def parse_privacy_policy(
     purpose_map, vagueness_warnings = _pass2_extract_purposes(
         full_text_lower, seen_categories, full_text_raw=raw_with_newlines
     )
+    for w in vagueness_warnings:
+        w["policy_url"] = policy_url      # the location of a vague statement
 
     # ── Pass 3: Disclosed third-party extraction ──────────────────────────
     disclosed_sdks = _pass3_extract_disclosed_sdks(

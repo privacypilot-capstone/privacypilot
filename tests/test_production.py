@@ -1587,16 +1587,18 @@ def test_M2_get_request_with_coordinates_is_a_transmission():
     assert (P.LOCATION, "maps.googleapis.com") in _sinks(f)
 
 
-def test_M3_one_vague_statement_is_one_violation():
+def test_M3_vague_statements_are_one_violation_per_category():
     s = "We use your information to provide and improve our services."
-    w = [{"pii_category": c, "margin": 0.02, "sentence": s, "top_label": "analytics"}
-         for c in ("email", "name", "phone")]
+    w = [{"pii_category": c, "margin": 0.02, "sentence": s, "top_label": "analytics",
+          "statement_no": 3} for c in ("email", "name", "phone")]
     w.append({"pii_category": "email", "margin": 0.05, "sentence": "Other: for business purposes.",
-              "top_label": "marketing"})
+              "top_label": "marketing", "statement_no": 9})
     v = [x for x in run_dpdp_rules([], [], set(), vagueness_warnings=w)
          if x.dpdp_section.startswith("DPDP Rules")]
-    assert len(v) == 2
-    assert sorted(x.pii_category for x in v) == ["email", "email, name, phone"]
+    assert sorted(x.pii_category for x in v) == ["email", "name", "phone"]   # each category once
+    email = next(x for x in v if x.pii_category == "email")
+    assert [l["statement"] for l in email.locations] == [3, 9]               # both statements listed
+    assert "2 purpose statements" in email.evidence and "0.020" in email.evidence
 
 
 def _metrics():
@@ -1617,13 +1619,13 @@ def test_M4_metrics_dedupe_recipient_vagueness_and_contract_option():
         {"dpdp_section": "Section 8(2)", "section_title": "Third-Party Transmission — Processor Contract Unverified",
          "pii_category": "phone", "recipient": "twilio"},
         {"dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)", "section_title": "Vague Purpose Statement",
-         "pii_category": "email, name, phone", "recipient": None},
+         "pii_category": "email", "recipient": None},
     ]}
     counted = cm.actual_violations(scan_result, "count")
     ignored = cm.actual_violations(scan_result, "ignore")
     assert len(counted) == 3 and len(ignored) == 2
     gt = [{"rule": "rule_2_third_party", "pii_category": "health", "recipient": "firebase"},
-          {"rule": "vagueness", "pii_category": "n/a"}]
+          {"rule": "vagueness", "pii_category": "email"}]
     m = cm.match_repo(gt, ignored)
     assert (m["strict_tp"], m["fn"], m["fp"]) == (2, 0, 0)
     # wrong recipient: only a lenient (PARTIAL) match
@@ -1782,7 +1784,7 @@ def test_R1_reports_list_every_finding_and_every_location(mem_db, monkeypatch):
         html = client.get(f"/report/{sid}").text
         assert "All Code Findings (250)" in html
         assert html.count("track(email_") == 250                  # not the first 10
-        assert "Code locations (40)" in html and "src/m40.py line 40" in html
+        assert "Locations (40)" in html and "src/m40.py line 40" in html
         pdf = client.get(f"/report/{sid}?format=pdf")
         assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
         res = client.get(f"/scans/{sid}/result").json()
@@ -1816,5 +1818,68 @@ def test_R3_long_code_lines_and_vague_sentences_are_kept():
 def test_R4_many_locations_are_counted_in_the_evidence_and_all_listed():
     fs = [_f(P.EMAIL, "mixpanel", f"s/{i}.py", i) for i in range(1, 11)]
     v = [x for x in run_dpdp_rules(fs, [], set()) if x.dpdp_section == "Section 8(2)"][0]
-    assert "10 locations (all listed under Code locations)" in v.evidence
+    assert "10 locations (all listed under Locations)" in v.evidence
     assert len(v.locations) == 10
+
+
+# ── W: worker processes and the database ─────────────────────────────────────
+
+def test_W1_each_worker_process_gets_its_own_database_connections(monkeypatch):
+    import tasks, database
+    calls = []
+    monkeypatch.setattr(database.engine, "dispose", lambda close=True: calls.append(close))
+    tasks._fresh_db_connections()
+    assert calls == [False]          # drop inherited connections, don't close the parent's
+    from celery import signals
+    assert any(getattr(r[1], "__name__", "") == "_fresh_db_connections" or
+               "_fresh_db_connections" in repr(r[1])
+               for r in signals.worker_process_init.receivers)
+
+
+def test_W2_a_transient_database_error_while_saving_is_retried(monkeypatch):
+    import tasks
+    from sqlalchemy.exc import DatabaseError
+    attempts = []
+    def flaky(*a):
+        attempts.append(a)
+        if len(attempts) < 2:
+            raise DatabaseError("COMMIT", None, Exception("PGRES_TUPLES_OK and no message"))
+    monkeypatch.setattr(tasks, "save_chunk", flaky)
+    monkeypatch.setattr(tasks.time, "sleep", lambda s: None)
+    tasks._save_with_retry(1, 0, 1, {})
+    assert len(attempts) == 2
+    # a persistent error still fails the task (and the scan, with the cause)
+    monkeypatch.setattr(tasks, "save_chunk",
+                        lambda *a: (_ for _ in ()).throw(DatabaseError("x", None, Exception("down"))))
+    with pytest.raises(DatabaseError):
+        tasks._save_with_retry(1, 0, 1, {})
+
+
+def test_R5_vague_statement_is_located_in_the_policy():
+    import database
+    warnings = [{"pii_category": c, "margin": 0.02, "top_label": "service_delivery",
+                 "sentence": "We use your information to improve our services.",
+                 "statement_no": 14, "policy_url": "https://x.org/privacy"}
+                for c in ("email", "phone")]
+    v = run_dpdp_rules([], [], set(), vagueness_warnings=warnings)
+    assert sorted(x.pii_category for x in v) == ["email", "phone"]
+    for x in v:
+        assert x.locations == [{"policy": "https://x.org/privacy", "statement": 14,
+                                "text": "We use your information to improve our services."}]
+    assert database.location_short(v[0].locations[0]) == "privacy policy statement 14"
+    assert "statement 14" in database.location_label(v[0].locations[0])
+
+
+def test_R6_every_vague_statement_is_kept_not_only_the_worst_per_category(monkeypatch):
+    text = ("We use your email address to improve our services. "
+            "We may use your email address for various business purposes.")
+    monkeypatch.setattr(pp, "_get_nlp", lambda: None)
+    class FakeST:
+        pass
+    # force both statements to look vague
+    monkeypatch.setattr(pp, "_get_st_model", lambda: (FakeST(), object()))
+    monkeypatch.setattr(pp, "_st_classify_purpose", lambda sent, m, t: ("service_delivery", 0.5, 0.48))
+    monkeypatch.setattr(pp, "_is_vague_wording", lambda s: True)
+    _, vw = pp._pass2_extract_purposes(text.lower(), {P.EMAIL}, full_text_raw=text)
+    assert len(vw) == 2
+    assert sorted(w["statement_no"] for w in vw) == [1, 2]

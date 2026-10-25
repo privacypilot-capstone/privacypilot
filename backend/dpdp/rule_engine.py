@@ -197,6 +197,9 @@ _ORIGIN_TAG = {"third_party": "third-party code", "generated": "generated code"}
 
 
 def _location_label(loc: dict) -> str:
+    if "policy" in loc:
+        from database import location_label
+        return location_label(loc)
     s = f"{loc.get('file') or 'unknown file'} line {loc.get('line')}"
     if loc.get("sinks"):
         s += f" ({', '.join(loc['sinks'])})"
@@ -216,7 +219,7 @@ INLINE_LOCATIONS = 3
 
 def _locations_text(locs: list[dict], prefix: str = "at") -> str:
     """'at a.py line 3', 'at 3 locations: a.py line 3; b.py line 9; c.py line 1'
-    or 'at 40 locations (all listed under Code locations)'. Every location is
+    or 'at 40 locations (all listed under Locations)'. Every location is
     always reported, so fixing the code at one place cannot be mistaken for
     fixing the violation."""
     if not locs:
@@ -225,7 +228,7 @@ def _locations_text(locs: list[dict], prefix: str = "at") -> str:
         return f"{prefix} {_location_label(locs[0])}"
     if len(locs) <= INLINE_LOCATIONS:
         return f"{prefix} {len(locs)} locations: " + "; ".join(_location_label(l) for l in locs)
-    return f"{prefix} {len(locs)} locations (all listed under Code locations)"
+    return f"{prefix} {len(locs)} locations (all listed under Locations)"
 
 
 def _origin_notes(findings) -> str:
@@ -651,28 +654,46 @@ def run_dpdp_rules(
     # When the purpose classifier's top-2 scores are within 0.08 of each other,
     # the stated purpose is ambiguous and fails the specificity requirement.
 
-    # One violation per vague STATEMENT. The parser emits a warning for each
-    # PII category a statement applies to (a generic "We use your information
-    # to …" statement applies to every disclosed category), which used to
-    # produce several violations — and several score penalties — for one
-    # sentence. The categories are listed in pii_category instead.
+    # One violation per PII CATEGORY, like every other rule: it lists every
+    # vague statement in the policy that covers that category as its
+    # locations. (Previously one violation per statement, so the same
+    # category appeared in several violations.) A generic "We use your
+    # information to …" statement covers every disclosed category, so it is
+    # listed under each of them — as one code line is listed under each
+    # category it carries.
     if vagueness_warnings:
-        by_statement: dict[str, list[dict]] = {}
+        by_cat: dict[str, list[dict]] = {}
         for w in vagueness_warnings:
-            stmt = " ".join((w.get("sentence") or "").split()).lower()
-            by_statement.setdefault(stmt or f"(no text) {w.get('pii_category')}", []).append(w)
-        for stmt, ws in by_statement.items():
-            key = f"vague_{stmt}"
+            by_cat.setdefault(w.get("pii_category") or "unknown", []).append(w)
+        for cat, ws in sorted(by_cat.items()):
+            key = f"vague_{cat}"
             if key in seen:
                 continue
             seen.add(key)
-            w = min(ws, key=lambda x: x.get("margin", 1.0))
-            cats = sorted({x.get("pii_category", "unknown") for x in ws})
-            cats_txt = ", ".join(cats)
-            _sentence = (w.get("sentence") or "").strip()
-            _quote_clause = (
-                f" The flagged clause: \"{_sentence}\"" if _sentence else ""
-            )
+            # One location per distinct statement (policy URL, position
+            # among the policy's statements, text), in policy order; the
+            # worst (smallest) margin of a statement's warnings is kept.
+            stmts: dict[str, dict] = {}
+            for w in ws:
+                k = " ".join((w.get("sentence") or "").split()).lower()
+                if k not in stmts or w.get("margin", 1.0) < stmts[k].get("margin", 1.0):
+                    stmts[k] = w
+            ordered = sorted(stmts.values(),
+                             key=lambda x: (x.get("statement_no") is None, x.get("statement_no") or 0))
+            locs = [{"policy": x.get("policy_url"), "statement": x.get("statement_no"),
+                     "text": (x.get("sentence") or "").strip()} for x in ordered]
+            worst = min(ordered, key=lambda x: x.get("margin", 1.0))
+            n = len(ordered)
+            if n == 1:
+                _sentence = (worst.get("sentence") or "").strip()
+                what = (f"The privacy policy's purpose statement covering '{cat}' "
+                        f"data is ambiguous")
+                quote = f" The flagged clause: \"{_sentence}\"" if _sentence else ""
+            else:
+                what = (f"{n} purpose statements in the privacy policy covering "
+                        f"'{cat}' data are ambiguous (all listed, with their text, "
+                        f"under Locations)")
+                quote = ""
             violations.append(DPDPViolation(
                 section="DPDP Rules 2025, Rule 3(b)(ii)",
                 title="Vague Purpose Statement",
@@ -681,21 +702,21 @@ def run_dpdp_rules(
                 # ambiguously — so it sits below the medium "contract
                 # unverifiable" case.
                 severity="low",
-                pii_category=cats_txt,
+                pii_category=cat,
                 evidence=(
-                    f"The privacy policy's purpose statement covering "
-                    f"{cats_txt} data is ambiguous: the classifier margin "
-                    f"between the top-2 purpose categories is "
-                    f"{w.get('margin', 0):.3f} (threshold 0.08), closest to "
-                    f"'{w.get('top_label', 'unknown')}'. Rule 3(b)(ii) of DPDP "
-                    f"Rules 2025 requires the notice to state the specified "
-                    f"purpose in clear and plain language.{_quote_clause}"
+                    f"{what}: the classifier margin between the top-2 purpose "
+                    f"categories is {worst.get('margin', 0):.3f}"
+                    f"{' at its smallest' if n > 1 else ''} (threshold 0.08), "
+                    f"closest to '{worst.get('top_label', 'unknown')}'. Rule "
+                    f"3(b)(ii) of DPDP Rules 2025 requires the notice to state "
+                    f"the specified purpose in clear and plain language.{quote}"
                 ),
                 recommendation=(
-                    f"Rewrite this purpose statement to be unambiguous. State "
-                    f"exactly what {cats_txt} data is used for rather than broad "
-                    f"terms like 'improve services'."
+                    f"Rewrite {'this purpose statement' if n == 1 else f'these {n} purpose statements'} "
+                    f"to be unambiguous. State exactly what '{cat}' data is used "
+                    f"for rather than broad terms like 'improve services'."
                 ),
+                locations=locs,
             ))
 
     n_provisions = len({v.dpdp_section for v in violations})

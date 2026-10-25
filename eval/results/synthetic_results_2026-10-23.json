@@ -1,0 +1,536 @@
+{
+ "compliant-demo": {
+  "scan_id": 37,
+  "source": "violations_37.csv (PrivacyPilot export, 23 Oct 2026)",
+  "violations": [
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Processor Contract Unverified",
+    "severity": "medium",
+    "pii_category": "phone",
+    "recipient": "twilio",
+    "location_count": 1,
+    "locations": "services/notifications.py:13"
+   }
+  ]
+ },
+ "fintech-demo": {
+  "scan_id": 36,
+  "source": "violations_36.csv (PrivacyPilot export, 23 Oct 2026)",
+  "violations": [
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "pan",
+    "recipient": null,
+    "location_count": 6,
+    "locations": "api/views.py:19; api/views.py:32; models/customer.py:20; models/customer.py:36; services/analytics.py:16; services/analytics.py:20"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "financial",
+    "recipient": null,
+    "location_count": 7,
+    "locations": "api/views.py:20; api/views.py:21; api/views.py:33; models/customer.py:24; models/customer.py:25; services/analytics.py:16; services/analytics.py:21"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "aadhaar",
+    "recipient": null,
+    "location_count": 5,
+    "locations": "api/views.py:22; api/views.py:34; models/customer.py:29; services/analytics.py:16; services/analytics.py:23"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "aadhaar",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/analytics.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": "segment",
+    "location_count": 2,
+    "locations": "services/analytics.py:16; services/analytics.py:30"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "financial",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/analytics.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "pan",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/analytics.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "name",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/analytics.py:30"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/analytics.py:30"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "name",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "services/analytics.py:30; services/analytics.py:35"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": null,
+    "location_count": 4,
+    "locations": "services/analytics.py:16; services/analytics.py:17; services/analytics.py:30; services/analytics.py:31"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "services/analytics.py:30; services/analytics.py:34"
+   }
+  ]
+ },
+ "dpdp-synthetic-test": {
+  "scan_id": 35,
+  "source": "violations_35.csv (PrivacyPilot export, 23 Oct 2026)",
+  "violations": [
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "biometric",
+    "recipient": null,
+    "location_count": 4,
+    "locations": "services/analytics_service.py:6; services/analytics_service.py:16; services/analytics_service.py:17; services/analytics_service.py:18"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "high",
+    "pii_category": "location",
+    "recipient": null,
+    "location_count": 3,
+    "locations": "services/analytics_service.py:9; services/analytics_service.py:11; services/analytics_service.py:12"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "aadhaar",
+    "recipient": null,
+    "location_count": 6,
+    "locations": "services/auth_service.py:13; services/auth_service.py:14; services/auth_service.py:16; utils/validators.py:8; utils/validators.py:12; utils/validators.py:17"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "health",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "services/health_service.py:14; services/health_service.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "location",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics_service.py:11"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics_service.py:23"
+   },
+   {
+    "dpdp_section": "Section 8(5)",
+    "section_title": "Security Safeguard \u2014 PII in Logger Output",
+    "severity": "critical",
+    "pii_category": "aadhaar",
+    "recipient": "application logs",
+    "location_count": 1,
+    "locations": "services/auth_service.py:14"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "health",
+    "recipient": "firebase",
+    "location_count": 1,
+    "locations": "services/health_service.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/user_service.py:18"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": "segment",
+    "location_count": 1,
+    "locations": "services/user_service.py:18"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": null,
+    "location_count": 7,
+    "locations": "services/analytics_service.py:21; services/analytics_service.py:23; services/analytics_service.py:24; services/user_service.py:7; services/user_service.py:13; services/user_service.py:18; services/user_service.py:26"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": null,
+    "location_count": 3,
+    "locations": "services/user_service.py:7; services/user_service.py:14; services/user_service.py:18"
+   }
+  ]
+ },
+ "edtech-demo": {
+  "scan_id": 34,
+  "source": "violations_34.csv (PrivacyPilot export, 23 Oct 2026)",
+  "violations": [
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "high",
+    "pii_category": "date_of_birth",
+    "recipient": null,
+    "location_count": 3,
+    "locations": "api/views.py:19; api/views.py:33; models/student.py:20"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "high",
+    "pii_category": "location",
+    "recipient": null,
+    "location_count": 14,
+    "locations": "api/views.py:20; api/views.py:21; api/views.py:22; api/views.py:34; api/views.py:35; models/student.py:24; models/student.py:25; models/student.py:26; services/analytics.py:16; services/analytics.py:24; services/analytics.py:29; services/analytics.py:31; services/analytics.py:35; services/analytics.py:36"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "location",
+    "recipient": "mixpanel",
+    "location_count": 2,
+    "locations": "services/analytics.py:16; services/analytics.py:31"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "name",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics.py:16"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "name",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "services/analytics.py:16; services/analytics.py:20"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "services/analytics.py:16; services/analytics.py:17"
+   },
+   {
+    "dpdp_section": "Section 6(1)",
+    "section_title": "Purpose\u2013PII Linkage \u2014 Processing Exceeds Stated Purpose",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "services/analytics.py:16; services/analytics.py:21"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "email",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 9"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "name",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 9"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "phone",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 9"
+   }
+  ]
+ },
+ "healthtech-demo": {
+  "scan_id": 33,
+  "source": "violations_33.csv (PrivacyPilot export, 23 Oct 2026)",
+  "violations": [
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "aadhaar",
+    "recipient": null,
+    "location_count": 7,
+    "locations": "api/views.py:18; api/views.py:39; models/patient.py:12; models/patient.py:25; services/analytics.py:21; services/analytics.py:25; services/analytics.py:26"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "health",
+    "recipient": null,
+    "location_count": 10,
+    "locations": "api/views.py:19; api/views.py:40; models/patient.py:15; services/analytics.py:19; services/analytics.py:20; services/analytics.py:25; services/analytics.py:26; services/notifications.py:25; services/notifications.py:29; services/notifications.py:30"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "high",
+    "pii_category": "date_of_birth",
+    "recipient": null,
+    "location_count": 3,
+    "locations": "api/views.py:20; api/views.py:42; models/patient.py:19"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "biometric",
+    "recipient": null,
+    "location_count": 2,
+    "locations": "api/views.py:41; models/patient.py:16"
+   },
+   {
+    "dpdp_section": "Section 5 / Section 6(1)",
+    "section_title": "Notice Gap \u2014 Undisclosed Data Collection",
+    "severity": "critical",
+    "pii_category": "pan",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "models/user.py:12"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "aadhaar",
+    "recipient": "firebase",
+    "location_count": 2,
+    "locations": "services/analytics.py:25; services/analytics.py:26"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "health",
+    "recipient": "firebase",
+    "location_count": 2,
+    "locations": "services/analytics.py:25; services/analytics.py:26"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": "firebase",
+    "location_count": 2,
+    "locations": "services/analytics.py:25; services/analytics.py:26"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "email",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics.py:36"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "location",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics.py:36"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": "mixpanel",
+    "location_count": 1,
+    "locations": "services/analytics.py:36"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "name",
+    "recipient": "twilio",
+    "location_count": 1,
+    "locations": "services/notifications.py:16"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "phone",
+    "recipient": "twilio",
+    "location_count": 2,
+    "locations": "services/notifications.py:16; services/notifications.py:29"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "critical",
+    "pii_category": "health",
+    "recipient": "twilio",
+    "location_count": 1,
+    "locations": "services/notifications.py:29"
+   },
+   {
+    "dpdp_section": "Section 8(2)",
+    "section_title": "Third-Party Transmission \u2014 Undisclosed Data Processor",
+    "severity": "high",
+    "pii_category": "location",
+    "recipient": "maps.googleapis.com",
+    "location_count": 1,
+    "locations": "services/tracking.py:28"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "email",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 10"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "location",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 10"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "name",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 10"
+   },
+   {
+    "dpdp_section": "DPDP Rules 2025, Rule 3(b)(ii)",
+    "section_title": "Vague Purpose Statement",
+    "severity": "low",
+    "pii_category": "phone",
+    "recipient": null,
+    "location_count": 1,
+    "locations": "privacy policy statement 10"
+   }
+  ]
+ }
+}

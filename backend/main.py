@@ -779,7 +779,9 @@ def _csv_response(rows, header, filename):
 
 @app.get("/scans/{scan_id}/violations.csv")
 def export_violations_csv(scan_id: int, db: Session = Depends(get_db)):
-    """Every violation, one row each; locations as 'file:line' joined by '; '."""
+    """Every violation, one row each; locations as 'file:line' (code) or
+    'privacy policy statement N' (policy) joined by '; '."""
+    from database import location_short
     if not db.query(Scan).filter(Scan.id == scan_id).first():
         raise HTTPException(status_code=404, detail="Scan not found")
     vs = db.query(Violation).filter(Violation.scan_id == scan_id).order_by(Violation.id).all()
@@ -789,7 +791,7 @@ def export_violations_csv(scan_id: int, db: Session = Depends(get_db)):
             locs = _violation_locations(v)
             yield [v.dpdp_section, v.section_title, v.severity, v.pii_category,
                    getattr(v, "recipient", None) or "", len(locs),
-                   "; ".join(f"{l.get('file')}:{l.get('line')}" for l in locs),
+                   "; ".join(location_short(l) for l in locs),
                    v.evidence, v.recommendation]
 
     return _csv_response(rows(), ["dpdp_section", "title", "severity", "pii_category",

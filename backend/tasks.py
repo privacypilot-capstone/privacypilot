@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 import json
+import time
 from datetime import datetime
 
 from celery import Celery, chord, group, signals
@@ -120,12 +121,36 @@ def _prepare_database(**_):
     Both steps are idempotent. The instance id is NOT created here: only the
     API creates it, so a worker on a different database is still detected."""
     try:
-        from database import create_tables, migrate_tables, describe_database_url
+        from database import create_tables, migrate_tables, describe_database_url, engine
         create_tables()
         migrate_tables()
         print(f"[worker] database = {describe_database_url()}; code version {CODE_VERSION}")
+        # Close the connections opened above BEFORE the pool processes are
+        # forked; otherwise every process inherits the same open connection.
+        engine.dispose()
     except Exception as e:
         print(f"[worker] WARNING: could not prepare the database: {e}")
+
+
+@signals.worker_process_init.connect
+def _fresh_db_connections(**_):
+    """
+    Each pool process must open its OWN database connections.
+
+    A forked process inherits the parent's connection pool, including any
+    open connection (the main process also uses the database, e.g. for the
+    worker_databases control command). Two processes then talk over the same
+    socket, their messages interleave, and commits fail with errors such as
+    "error with status PGRES_TUPLES_OK and no message from the libpq" or
+    "This result object does not return rows" — which failed whole scans.
+    dispose(close=False) drops the inherited connections without closing
+    them (they still belong to the parent); this process opens new ones.
+    """
+    try:
+        from database import engine
+        engine.dispose(close=False)
+    except Exception as e:
+        print(f"[worker] WARNING: could not reset database connections: {e}")
 
 
 @signals.worker_init.connect
@@ -303,8 +328,31 @@ def scan_chunk_task(self, scan_id: int, chunk_no: int, round_no: int,
     if result["unfinished"]:
         print(f"[task] Scan {scan_id} chunk {chunk_no}: time limit, "
               f"{len(result['unfinished'])} file(s) moved to the next round")
-    save_chunk(scan_id, chunk_no, round_no, result)
+    _save_with_retry(scan_id, chunk_no, round_no, result)
     return {"chunk": chunk_no, "round": round_no, "unfinished": result["unfinished"]}
+
+
+SAVE_ATTEMPTS = 3
+
+
+def _save_with_retry(scan_id: int, chunk_no: int, round_no: int, result: dict) -> None:
+    """
+    Save a chunk, retrying a transient database error (a dropped or reset
+    connection) instead of failing the whole scan for it. save_chunk is
+    idempotent (a chunk saved twice counts once), and each attempt uses a
+    new session; the failed connection is discarded by the pool.
+    """
+    from sqlalchemy.exc import DBAPIError, ResourceClosedError
+    for attempt in range(1, SAVE_ATTEMPTS + 1):
+        try:
+            save_chunk(scan_id, chunk_no, round_no, result)
+            return
+        except (DBAPIError, ResourceClosedError) as e:
+            if attempt == SAVE_ATTEMPTS:
+                raise
+            print(f"[task] Scan {scan_id} chunk {chunk_no}: database error while "
+                  f"saving ({type(e).__name__}); retrying ({attempt}/{SAVE_ATTEMPTS - 1})")
+            time.sleep(2 * attempt)
 
 
 def run_chunk(reader, paths: list) -> dict:

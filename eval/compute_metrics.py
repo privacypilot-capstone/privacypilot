@@ -27,8 +27,8 @@ Unit of comparison
   match also requires the same recipient (the scanner's recipient label, e.g.
   "firebase", "segment", "maps.googleapis.com", "application logs"); a match on rule and
   category with another recipient is PARTIAL. Vague-purpose violations are
-  reported per policy statement and list several categories, so for the
-  "vagueness" rule the category is not compared.
+  reported once per PII category (listing every vague statement covering it),
+  so they are compared by category like every other rule.
 
 Options
   --contract-unverified count|ignore
@@ -92,7 +92,7 @@ def _norm(x):
 def exact_match(gt: dict, a: dict) -> bool:
     if a["rule"] != gt["rule"]:
         return False
-    if gt["rule"] != "vagueness" and a["pii_category"] != gt["pii_category"]:
+    if a["pii_category"] != gt["pii_category"]:
         return False
     if gt.get("recipient") and _norm(a.get("recipient")) != _norm(gt["recipient"]):
         return False

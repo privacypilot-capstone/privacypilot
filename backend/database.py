@@ -22,7 +22,11 @@ if DATABASE_URL.startswith("postgresql://"):
 
 # SQLite needs check_same_thread=False for FastAPI's threading model
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+# pool_pre_ping: test a pooled connection before using it, so a connection
+# the server closed (restart, idle timeout) is replaced instead of failing
+# the next query.
+engine = create_engine(DATABASE_URL, connect_args=connect_args,
+                       pool_pre_ping=not DATABASE_URL.startswith("sqlite"))
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -266,6 +270,14 @@ def scan_gap_categories(scan, findings=None) -> list[str]:
     return sorted({f.pii_category for f in (findings or []) if f.is_gap})
 
 
+def location_short(loc: dict) -> str:
+    """Compact form for one CSV cell: 'path:line' or 'privacy policy statement N'."""
+    if "policy" in loc:
+        return (f"privacy policy statement {loc['statement']}" if loc.get("statement")
+                else "privacy policy")
+    return f"{loc.get('file')}:{loc.get('line')}"
+
+
 def violation_locations(v) -> list:
     """Every code location behind a stored violation ([] for violations
     stored before locations were recorded)."""
@@ -279,7 +291,13 @@ def violation_locations(v) -> list:
 
 def location_label(loc: dict) -> str:
     """'path line N (sinks) (module: …) [third-party code]' — the same form the
-    rule engine uses in evidence text."""
+    rule engine uses in evidence text. A privacy-policy location (vague
+    purpose statement) reads 'privacy policy (URL), statement N: "…"'."""
+    if "policy" in loc:
+        where = f"privacy policy ({loc['policy']})" if loc.get("policy") else "privacy policy"
+        if loc.get("statement"):
+            where += f", statement {loc['statement']}"
+        return where + (f': "{loc["text"]}"' if loc.get("text") else "")
     s = f"{loc.get('file') or 'unknown file'} line {loc.get('line')}"
     if loc.get("sinks"):
         s += f" ({', '.join(loc['sinks'])})"

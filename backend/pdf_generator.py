@@ -234,7 +234,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
         story.append(Paragraph(f'<b>Evidence:</b> {_x(v.evidence)}', vbody_style))
         locs = violation_locations(v)
         if locs:
-            story.append(Paragraph(f'<b>Code locations ({len(locs)}):</b>', vbody_style))
+            story.append(Paragraph(f'<b>Locations ({len(locs)}):</b>', vbody_style))
             for i, l in enumerate(locs, 1):
                 story.append(Paragraph(f'{i}. {_x(location_label(l))}', loc_style))
         story.append(Paragraph(f'<b>Fix:</b> {_x(v.recommendation)}', vfix_style))

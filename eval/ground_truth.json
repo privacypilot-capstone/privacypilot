@@ -1,0 +1,403 @@
+{
+  "_readme": "Final ground truth for the five synthetic repositories (eval/privacy_pilot_ground_truth_reviewed_v6.csv). Unit: one entry per (rule, PII category); rule_2 entries also carry the recipient label the scanner reports, so a strict match requires the same recipient. Vague purposes are one entry per category covered by a vague statement. Judgment cases were decided by the project team on 23 Oct 2026: DP-V5 negative (UIDAI is the verifying authority, not a processor); DP-J1, DP-J2, DP-J3, HEALTH-J1, HEALTH-J2, HEALTH-J3, HEALTH-J4, EDU-J1 positive; HEALTH-V8 positive (GPS coordinates are a different data item from a home address). Negative controls are not entries: any reported violation they cause is a false positive. Score with: python eval/compute_metrics.py --contract-unverified count (COMP-N4's 'processor contract unverified' item counts as a false positive). 'label' must match eval/repos.json.",
+  "repos": [
+    {
+      "label": "dpdp-synthetic-test",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "location",
+          "case_id": "DP-V9",
+          "note": "not in policy"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "biometric",
+          "case_id": "DP-V2",
+          "note": "fingerprint_hash"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "aadhaar",
+          "case_id": "DP-V10",
+          "note": "not in policy"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "health",
+          "case_id": "DP-V11",
+          "note": "diagnosis"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "DP-V1",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "DP-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "health",
+          "case_id": "DP-V6",
+          "note": "-> Firebase (requests.post)",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "DP-V7",
+          "note": "-> Segment (requests.post)",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "DP-V8",
+          "note": "-> Segment (requests.post)",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "aadhaar",
+          "case_id": "DP-V4",
+          "note": "logger, Section 8(5)",
+          "recipient": "application logs"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "email",
+          "case_id": "DP-J1",
+          "note": "analytics use; 'improve our services' is not a specific analytics purpose (decided)"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "phone",
+          "case_id": "DP-J2",
+          "note": "analytics use; 'improve our services' is not a specific analytics purpose (decided)"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "name",
+          "case_id": "DP-J3",
+          "note": "'to provide and improve our services' (decided); one entry per category"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "email",
+          "case_id": "DP-J3",
+          "note": "'to provide and improve our services' (decided); one entry per category"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "phone",
+          "case_id": "DP-J3",
+          "note": "'to provide and improve our services' (decided); one entry per category"
+        }
+      ]
+    },
+    {
+      "label": "healthtech-demo",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "aadhaar",
+          "case_id": "HEALTH-V1",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "health",
+          "case_id": "HEALTH-V2",
+          "note": "blood group"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "biometric",
+          "case_id": "HEALTH-V3",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "date_of_birth",
+          "case_id": "HEALTH-V6",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "pan",
+          "case_id": "HEALTH-V7",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "location",
+          "case_id": "HEALTH-V8",
+          "note": "GPS coordinates (element-level rubric)"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "HEALTH-V4",
+          "note": "-> Firebase",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "health",
+          "case_id": "HEALTH-V4",
+          "note": "-> Firebase",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "aadhaar",
+          "case_id": "HEALTH-V4",
+          "note": "-> Firebase",
+          "recipient": "firebase"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "HEALTH-V5",
+          "note": "-> Twilio",
+          "recipient": "twilio"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "name",
+          "case_id": "HEALTH-V5",
+          "note": "-> Twilio",
+          "recipient": "twilio"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "health",
+          "case_id": "HEALTH-V10",
+          "note": "-> Twilio",
+          "recipient": "twilio"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "HEALTH-V9",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "HEALTH-V9",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "HEALTH-V9",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "HEALTH-J1",
+          "note": "coordinates -> Google Maps geocoding (requests.get) (decided)",
+          "recipient": "maps.googleapis.com"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "phone",
+          "case_id": "HEALTH-J2",
+          "note": "analytics use; 'Improve our platform' is not a specific analytics purpose (decided)"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "email",
+          "case_id": "HEALTH-J3",
+          "note": "analytics use; 'Improve our platform' is not a specific analytics purpose (decided)"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "name",
+          "case_id": "HEALTH-J4",
+          "note": "'Improve our platform' covers every disclosed category (decided); one entry per category"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "email",
+          "case_id": "HEALTH-J4",
+          "note": "'Improve our platform' covers every disclosed category (decided); one entry per category"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "phone",
+          "case_id": "HEALTH-J4",
+          "note": "'Improve our platform' covers every disclosed category (decided); one entry per category"
+        },
+        {
+          "rule": "vagueness",
+          "pii_category": "location",
+          "case_id": "HEALTH-J4",
+          "note": "'Improve our platform' covers every disclosed category (decided); one entry per category"
+        }
+      ]
+    },
+    {
+      "label": "fintech-demo",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "pan",
+          "case_id": "FIN-V1",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "financial",
+          "case_id": "FIN-V2/FIN-V3",
+          "note": "bank account + IFSC (one category)"
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "aadhaar",
+          "case_id": "FIN-V4",
+          "note": ""
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "FIN-V5/V6",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "pan",
+          "case_id": "FIN-V5",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "financial",
+          "case_id": "FIN-V5",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "aadhaar",
+          "case_id": "FIN-V5",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "FIN-V6",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "name",
+          "case_id": "FIN-V6",
+          "note": "-> Segment",
+          "recipient": "segment"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "email",
+          "case_id": "FIN-V7",
+          "note": ""
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "phone",
+          "case_id": "FIN-V8",
+          "note": ""
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "name",
+          "case_id": "FIN-V9",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "label": "edtech-demo",
+      "violations": [
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "date_of_birth",
+          "case_id": "EDU-V1",
+          "note": ""
+        },
+        {
+          "rule": "rule_1_notice_gap",
+          "pii_category": "location",
+          "case_id": "EDU-V2",
+          "note": ""
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "email",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "name",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "phone",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_2_third_party",
+          "pii_category": "location",
+          "case_id": "EDU-V3",
+          "note": "-> Mixpanel",
+          "recipient": "mixpanel"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "name",
+          "case_id": "EDU-J1",
+          "note": "course-progress analytics event; the policy does not say which third-party tool is used (decided positive)"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "email",
+          "case_id": "EDU-J1",
+          "note": "course-progress analytics event; the policy does not say which third-party tool is used (decided positive)"
+        },
+        {
+          "rule": "rule_3_purpose_linkage",
+          "pii_category": "phone",
+          "case_id": "EDU-J1",
+          "note": "course-progress analytics event; the policy does not say which third-party tool is used (decided positive)"
+        }
+      ]
+    },
+    {
+      "label": "compliant-demo",
+      "violations": []
+    }
+  ]
+}
