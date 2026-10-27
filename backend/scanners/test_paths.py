@@ -8,6 +8,11 @@ default they do not produce DPDP violations, do not create consent gaps and
 do not count as a module's use of a data category.
 
 Set PRIVACYPILOT_INCLUDE_TEST_CODE=1 to treat test code like any other code.
+
+Example and demo programs (examples/, samples/, demo/ …) are treated the
+same way: they show how to call a library with sample values and are not
+the application processing its users' data. Set
+PRIVACYPILOT_INCLUDE_EXAMPLE_CODE=1 to count them.
 Schema migrations are treated the same way: they record past table layouts,
 which the models already describe.
 """
@@ -29,6 +34,24 @@ _TEST_FILE_RE = re.compile(
 )
 
 
+_EXAMPLE_DIRS = {
+    "example", "examples", "sample", "samples", "demo", "demos",
+    "example-app", "example_app", "sample-app", "sample_app", "playground",
+}
+
+
+def include_example_code() -> bool:
+    return os.getenv("PRIVACYPILOT_INCLUDE_EXAMPLE_CODE", "0").lower() in ("1", "true", "yes")
+
+
+def is_example_path(path: str | None) -> bool:
+    """True for a file inside an example / sample / demo directory."""
+    if not path:
+        return False
+    p = PurePosixPath(path.replace("\\", "/"))
+    return any(part.lower() in _EXAMPLE_DIRS for part in p.parts[:-1])
+
+
 def include_test_code() -> bool:
     return os.getenv("PRIVACYPILOT_INCLUDE_TEST_CODE", "0").lower() in ("1", "true", "yes")
 
@@ -46,4 +69,8 @@ def is_test_path(path: str | None) -> bool:
 
 def counts_for_rules(path: str | None) -> bool:
     """Whether a finding in this file can produce violations."""
-    return include_test_code() or not is_test_path(path)
+    if is_test_path(path) and not include_test_code():
+        return False
+    if is_example_path(path) and not include_example_code():
+        return False
+    return True

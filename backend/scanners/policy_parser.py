@@ -13,6 +13,7 @@ Returns: (policy_claims, purpose_map, vagueness_warnings)
 """
 
 import ipaddress
+import os
 import re
 import socket
 import requests
@@ -211,15 +212,18 @@ POLICY_PII_MAP = {
     'phone number': PIICategory.PHONE, 'mobile number': PIICategory.PHONE,
     'telephone number': PIICategory.PHONE, 'contact number': PIICategory.PHONE,
     'phone': PIICategory.PHONE, 'mobile': PIICategory.PHONE, 'telephone': PIICategory.PHONE,
+    'whatsapp number': PIICategory.PHONE,
     # Email
     'email address': PIICategory.EMAIL, 'e-mail address': PIICategory.EMAIL,
     'email id': PIICategory.EMAIL, 'email': PIICategory.EMAIL, 'e-mail': PIICategory.EMAIL,
     # Location
-    'ip address': PIICategory.LOCATION, 'postal address': PIICategory.LOCATION,
+    'postal address': PIICategory.LOCATION,
     'home address': PIICategory.LOCATION, 'residential address': PIICategory.LOCATION,
     'billing address': PIICategory.LOCATION, 'shipping address': PIICategory.LOCATION,
     'mailing address': PIICategory.LOCATION, 'geolocation': PIICategory.LOCATION,
     'location': PIICategory.LOCATION, 'address': PIICategory.LOCATION, 'gps': PIICategory.LOCATION,
+    'pin code': PIICategory.LOCATION, 'pincode': PIICategory.LOCATION, 'postal code': PIICategory.LOCATION,
+    'zip code': PIICategory.LOCATION,
     # Health
     'health information': PIICategory.HEALTH, 'health data': PIICategory.HEALTH,
     'health records': PIICategory.HEALTH, 'medical records': PIICategory.HEALTH,
@@ -231,7 +235,8 @@ POLICY_PII_MAP = {
     'bank account': PIICategory.FINANCIAL, 'bank details': PIICategory.FINANCIAL,
     'credit card': PIICategory.FINANCIAL, 'debit card': PIICategory.FINANCIAL,
     'account number': PIICategory.FINANCIAL, 'upi id': PIICategory.FINANCIAL,
-    'financial': PIICategory.FINANCIAL, 'bank': PIICategory.FINANCIAL,
+    'upi': PIICategory.FINANCIAL, 'payment card': PIICategory.FINANCIAL,
+    'financial': PIICategory.FINANCIAL,
     # Name
     'full name': PIICategory.NAME, 'first name': PIICategory.NAME, 'last name': PIICategory.NAME,
     'legal name': PIICategory.NAME, 'your name': PIICategory.NAME, 'name': PIICategory.NAME,
@@ -284,11 +289,14 @@ BULLET_PII_MAP: list[tuple[str, "PIICategory"]] = [
     ("postal address",          PIICategory.LOCATION),
     ("billing address",         PIICategory.LOCATION),
     ("shipping address",        PIICategory.LOCATION),
-    ("ip address",              PIICategory.LOCATION),
     ("gps location",            PIICategory.LOCATION),
     ("geo location",            PIICategory.LOCATION),
     ("geolocation",             PIICategory.LOCATION),
     ("location",                PIICategory.LOCATION),
+    ("pin code",                PIICategory.LOCATION),
+    ("pincode",                 PIICategory.LOCATION),
+    ("postal code",             PIICategory.LOCATION),
+    ("zip code",                PIICategory.LOCATION),
     ("address",                 PIICategory.LOCATION),
     # Health
     ("health information",      PIICategory.HEALTH),
@@ -309,6 +317,8 @@ BULLET_PII_MAP: list[tuple[str, "PIICategory"]] = [
     ("debit card",              PIICategory.FINANCIAL),
     ("bank account",            PIICategory.FINANCIAL),
     ("account number",          PIICategory.FINANCIAL),
+    ("payment card",            PIICategory.FINANCIAL),
+    ("upi id",                  PIICategory.FINANCIAL),
     ("financial",               PIICategory.FINANCIAL),
     # Name — require qualifier in bullet context; bare "name" excluded
     ("full name",               PIICategory.NAME),
@@ -350,6 +360,20 @@ _BULLET_EXCLUSIONS = [re.compile(p, re.IGNORECASE) for p in [
     r'\bmedical\s+(?:disclaimer|advice|professional)\b',
     r'\bhealth\s+(?:tips?|advice|disclaimer|insurance\s+claim)\b',
     r'\bfinancial\s+(?:advice|disclaimer|year|planning\s+tips?)\b',
+    # Device and network addresses are not a person's location. The code
+    # scanner already excludes ip_address / mac_address / server_address; a
+    # policy that discloses IP addresses must not count as disclosing
+    # location either, or a real location notice gap is hidden.
+    r'\b(?:ip|mac|web|website|url|internet|server|network|device|wallet)\s+address(?:es)?\b',
+    # "address" as a verb: "to address your queries", "we will address the issue"
+    r'(?<!email )(?<!e-mail )(?<!postal )(?<!home )\baddress(?:es|ed|ing)?\s+(?:your|any|the|such|our|these|this|that|their|its|all|them|it|complaints?|grievances?|queries|concerns|issues|requests?)\b',
+    # where servers or data are kept is not the user's location
+    r'\b(?:server|servers|storage|hosting|data\s+storage|data\s+cent(?:er|re))\s+locations?\b',
+    r'\blocations?\s+of\s+(?:our|the|its)\s+(?:servers?|data\s+cent(?:er|re)s?|offices?|facilities|data)\b',
+    # institutions and regulators are not financial data
+    r'\bfinancial\s+(?:institutions?|regulators?|services?\s+providers?|partners?|intermediar(?:y|ies)|instruments?|statements?\s+of\s+(?:the|our)\s+company)\b',
+    # the device or app, not a phone number
+    r'\bmobile\s+(?:app|apps|application|applications|device|devices|version|site|website|browser|platform|operating\s+system|network|operator|carrier)\b',
 ]]
 
 # Extra exclusions for full sentences (applied together with the bullet ones).
@@ -495,34 +519,177 @@ def is_stock_vague(sentence: str) -> bool:
     return bool(_PURPOSE_MARKER_RE.search(sentence) and _VAGUE_PHRASE_RE.search(sentence))
 
 
-def _is_vague_wording(sentence: str) -> bool:
-    """
-    Whether a unit whose classifier margin is narrow is a vague purpose
-    statement. Stock vague wording always is. Otherwise the unit must be a
-    short purpose statement (a use verb, a purpose marker, at most
-    VAGUE_MAX_WORDS words — long policy sentences listing several specific
-    purposes are not vague) whose purpose part coordinates two or more
-    purpose categories in one breath ("to provide and personalise").
-    """
-    # A list lead-in ("We use your information to:") is an unfinished
-    # sentence; its bullets (each prefixed with it) carry the purposes.
-    if sentence.rstrip().endswith(':'):
-        return False
-    if _NOT_PURPOSE_STATEMENT_RE.search(sentence) or not _PURPOSE_MARKER_RE.search(sentence):
-        return False
-    if _VAGUE_PHRASE_RE.search(sentence):
-        return True
-    if len(sentence.split()) > VAGUE_MAX_WORDS or not _USE_STATEMENT_RE.search(sentence):
-        return False
-    # Several purposes named in one breath ("to provide, personalise and
-    # market"): the purpose part must coordinate two or more of them. One
-    # verb phrase ("Provide personalised learning experiences") is a single
-    # specific purpose even if its words touch two keyword lists.
+# ── Purpose specificity (Rule 3(b)(ii)) ───────────────────────────────────────
+# Rule 3(b)(ii) asks the notice to give "the specified purpose" of processing.
+# A purpose is vague when its wording names nothing more specific than the
+# fact that data is used for the service or the business: "to provide and
+# improve our services", "for business purposes". Whether wording is generic
+# is judged from the words themselves, not from how unsure the purpose
+# classifier is: two close embedding scores mean the CLASSIFIER cannot choose
+# between purposes, not that the sentence is vague ("to administer the
+# platform and provide security" is clear to a reader yet sits between the
+# security and service-delivery templates).
+#
+# The generic vocabulary below follows the vague terms reported by Lebanoff &
+# Liu, "Automatic Detection of Vague Words and Sentences in Privacy Policies"
+# (EMNLP 2018) — "information", "other", "some", "certain", "various",
+# "services", "purposes" … — extended with the generic verbs of purpose
+# statements ("provide", "improve", "operate", "administer").
+_GENERIC_PURPOSE_WORDS = {
+    # nouns
+    "service", "product", "platform", "experience", "business", "purpose",
+    "interest", "operation", "functionality", "feature", "website", "site",
+    "app", "application", "offering", "quality", "need", "requirement",
+    "activity", "information", "data", "detail", "way", "level", "user",
+    "customer", "matter", "thing", "content", "solution", "system", "people",
+    "other", "others", "part", "kind", "type", "manner", "extent", "use",
+    "related", "connection", "relation", "course", "time", "case", "basis",
+    # adjectives / adverbs
+    "various", "certain", "some", "such", "general", "overall", "internal",
+    "best", "better", "high", "highest", "possible", "new", "more", "relevant",
+    "appropriate", "necessary", "legitimate", "efficient", "effective",
+    "improved", "enhanced", "existing", "own", "same", "similar", "additional",
+    "further", "continued", "ongoing", "smooth", "seamless", "overall", "also",
+    # verbs
+    "provide", "improve", "enhance", "operate", "run", "manage", "administer",
+    "offer", "deliver", "maintain", "support", "help", "enable", "ensure",
+    "make", "perform", "carry", "conduct", "facilitate", "develop", "serve",
+    "give", "allow", "do", "include", "relate", "require", "optimise",
+    "optimize", "upgrade", "evaluate", "review", "process", "handle",
+}
+_PURPOSE_STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "to", "for", "in", "on", "at", "by",
+    "with", "from", "as", "about", "into", "over", "under", "our", "your",
+    "their", "its", "his", "her", "we", "us", "you", "they", "it", "this",
+    "that", "these", "those", "which", "who", "whom", "what", "be", "is",
+    "are", "was", "were", "been", "being", "can", "could", "may", "might",
+    "will", "would", "shall", "should", "must", "so", "than", "then", "if",
+    "any", "all", "each", "every", "both", "either", "not", "no", "etc",
+    "including", "e.g", "eg", "i.e", "ie", "order", "in", "us", "me", "my",
+    "time", "from", "upon", "via", "per", "where", "when", "how", "why",
+}
+# A purpose clause that only points elsewhere ("solely for this purpose",
+# "for the purposes described above") states no purpose of its own.
+_ANAPHORIC_PURPOSE_RE = re.compile(
+    r"^\s*(?:the\s+|these\s+|this\s+|that\s+|such\s+|those\s+|the\s+same\s+|the\s+above\s+)"
+    r"(?:purposes?|reasons?)\b(?!\s+(?:of|to)\b)", re.I)
+_ANAPHORIC_TAIL_RE = re.compile(
+    r"\b(?:purposes?|reasons?)\s+(?:described|set\s+out|listed|mentioned|stated|specified|outlined)\b", re.I)
+# Purpose verbs that name a kind of use but no object: listed together over
+# a generic object they leave the purpose unspecified.
+_SOFT_PURPOSE_STEMS = (
+    "personali", "customi", "tailor", "market", "advertis", "promot", "analy",
+    "statistic", "insight", "recommend", "measure", "monitor", "improv",
+    "enhanc", "optimi", "develop", "innovat", "research",
+)
+_PURPOSE_WORD_RE = re.compile(r"[a-z][a-z'\-]*", re.I)
+
+
+def _word_root(w: str) -> str:
+    """Crude, deterministic lemmatisation: services → service, improving →
+    improve, provided → provide, personalised → personalise."""
+    w = w.lower().strip("'-")
+    if w in _GENERIC_PURPOSE_WORDS:
+        return w
+    for suf, rep in (("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
+        if w.endswith(suf) and len(w) - len(suf) >= 3:
+            root = w[: -len(suf)] + rep
+            for cand in (root, root + "e"):
+                if cand in _GENERIC_PURPOSE_WORDS:
+                    return cand
+            if suf in ("s", "es", "ies"):
+                return root
+            return root + ("e" if (root + "e") in _GENERIC_PURPOSE_WORDS else "")
+    return w
+
+
+def _purpose_part(sentence: str) -> str | None:
+    """The text after the first purpose marker ("to", "for", "so that",
+    "in order to"), with the personal-data phrases blanked out (they name
+    the DATA, not the purpose). None when the unit states no purpose."""
     m = _PURPOSE_MARKER_RE.search(sentence)
-    part = sentence[m.end():] if m else sentence
-    if not re.search(r"\b(?:and|or)\b|,|/", part):
-        return False
-    return len(_keyword_purposes(part)) >= 2
+    if not m:
+        return None
+    part = sentence[m.end():]
+    low = part.lower()
+    for rx, _, _ in _POLICY_PHRASE_RX:
+        low = rx.sub(lambda x: " " * len(x.group(0)), low)
+    # keep capitalisation information for proper-noun detection
+    return "".join(c if low[i] != " " or c == " " else " " for i, c in enumerate(part))
+
+
+def _content_words(part: str) -> list[tuple[str, bool]]:
+    """(root, is_name) for the purpose part's content words. A capitalised
+    word that does not start the clause is treated as a name (the company,
+    product or app) — a name is not a purpose."""
+    out = []
+    for i, m in enumerate(_PURPOSE_WORD_RE.finditer(part)):
+        w = m.group(0)
+        if w.lower() in _PURPOSE_STOPWORDS or len(w) < 2:
+            continue
+        is_name = w[0].isupper() and i > 0 and not w.isupper()
+        out.append((_word_root(w), is_name))
+    return out
+
+
+def vagueness_scope() -> str:
+    """'notice' (default): a category is vague only when no statement in the
+    policy gives it a specific purpose. 'statement': every generic purpose
+    statement is reported."""
+    v = os.getenv("PRIVACYPILOT_VAGUENESS_SCOPE", "notice").strip().lower()
+    return v if v in ("notice", "statement") else "notice"
+
+
+def purpose_statement_kind(sentence: str) -> str:
+    """
+    Classify one policy unit for Rule 3(b)(ii):
+      "none"     — not a purpose statement (no purpose marker or use verb, a
+                   list lead-in, terms-acceptance or policy boilerplate, or a
+                   clause that only refers to purposes stated elsewhere);
+      "stock"    — stock vague wording ("business purposes", "improve our
+                   services", "legitimate interests");
+      "vague"    — its purpose wording is generic: every content word is
+                   generic, or it lists two or more purposes over nothing
+                   but generic words ("to provide, personalise and market
+                   our services");
+      "specific" — it names something specific ("to verify your identity",
+                   "to send you payment receipts", "for a loan").
+    """
+    s = sentence.strip()
+    if not s or s.endswith(':') or _NOT_PURPOSE_STATEMENT_RE.search(s):
+        return "none"
+    if not _PURPOSE_MARKER_RE.search(s):
+        return "none"
+    if _VAGUE_PHRASE_RE.search(s) and _USE_STATEMENT_RE.search(s):
+        return "stock"
+    if not _USE_STATEMENT_RE.search(s):
+        return "none"
+    part = _purpose_part(s)
+    if part is None:
+        return "none"
+    if _ANAPHORIC_PURPOSE_RE.search(part) or _ANAPHORIC_TAIL_RE.search(part):
+        return "none"
+    words = _content_words(part)
+    if not words:
+        return "none"
+    generic = [w for w, is_name in words if is_name or w in _GENERIC_PURPOSE_WORDS]
+    if len(generic) == len(words):
+        return "vague"
+    # Several purposes coordinated over generic words only ("to provide,
+    # personalise and market our services"): every non-generic word is a
+    # soft purpose verb with no object of its own. A concrete object
+    # ("your account", "security", "OTPs") makes the purpose specific.
+    if re.search(r"\b(?:and|or)\b|,|/", part) and len(_keyword_purposes(part)) >= 2:
+        rest = [w for w, is_name in words if not (is_name or w in _GENERIC_PURPOSE_WORDS)]
+        if rest and all(w.startswith(_SOFT_PURPOSE_STEMS) for w in rest):
+            return "vague"
+    return "specific"
+
+
+def _is_vague_wording(sentence: str) -> bool:
+    """Whether a unit is a vague purpose statement (stock or generic wording)."""
+    return purpose_statement_kind(sentence) in ("stock", "vague")
+
 
 # ── Lazy-loaded NLP models ────────────────────────────────────────────────────
 
@@ -941,6 +1108,14 @@ def _pass1_extract_pii(
         if not _CONTEXT_RE.search(sentence):
             continue
         for category, keyword in _find_policy_pii(sentence):
+            # "We do not collect your Aadhaar number" discloses nothing: a
+            # mention governed by a negated collection verb in the same
+            # clause is not a disclosure (a notice that denies collecting
+            # data the code collects must still yield a notice gap). A
+            # negated SHARING verb ("we never sell your email") still
+            # implies the data is held, so it does count.
+            if _negated_collection(sentence, keyword):
+                continue
             if category not in seen:
                 seen.add(category)
                 findings.append(DataFlowObject(
@@ -1057,6 +1232,8 @@ def _pass2_extract_purposes(
     """
     purpose_map: dict[PIICategory, set[str]] = {}
     vagueness_warnings: list[dict] = []
+    # category → statements that state a specific purpose for it
+    specific_for: dict[PIICategory, list[str]] = {}
 
     nlp = _get_nlp()
     st_model, template_embeddings = _get_st_model()
@@ -1099,13 +1276,16 @@ def _pass2_extract_purposes(
             sent = _affirmative_part(quoted).strip()
             if len(sent) < 10:
                 continue
-            # Stock vague wording ("Improve our platform", "to provide and
-            # improve our services") states no specified purpose: it is
-            # reported as vague whether or not the classifier is available,
-            # and the purposes it seems to name are NOT added to purpose_map
-            # (otherwise "improve our platform" made analytics use look
-            # disclosed and hid a Rule 3 violation).
-            if is_stock_vague(sent):
+            # Rule 3(b)(ii): a statement whose purpose wording is stock or
+            # generic ("Improve our platform", "to provide and improve our
+            # services") states no specified purpose. It is a vagueness
+            # candidate for this category, and the purposes it seems to name
+            # are NOT added to purpose_map (otherwise "improve our platform"
+            # made analytics use look disclosed and hid a Rule 3 violation).
+            # Whether the CATEGORY is reported as vague is decided below, for
+            # the notice as a whole.
+            kind = purpose_statement_kind(sent)
+            if kind in ("stock", "vague"):
                 vagueness_warnings.append({
                     "pii_category": cat.value,
                     "margin":       None,
@@ -1113,9 +1293,12 @@ def _pass2_extract_purposes(
                     "statement_no": statement_no.get(quoted),
                     "top_label":    None,
                     "top_score":    None,
-                    "reason":       "stock vague wording",
+                    "reason":       ("stock vague wording" if kind == "stock"
+                                     else "generic purpose wording"),
                 })
                 continue
+            if kind == "specific":
+                specific_for.setdefault(cat, []).append(quoted)
             # ── spaCy dependency pass ──────────────────────────────────────
             if nlp:
                 spacy_results = _spacy_extract_purposes([sent], nlp)
@@ -1129,19 +1312,9 @@ def _pass2_extract_purposes(
                 )
                 if best_score >= 0.30:  # min confidence threshold
                     cat_purposes.add(best_label)
-                # Vagueness: margin between top-2 too small
-                margin = best_score - second_score
-                if margin < VAGUENESS_MARGIN and best_score >= 0.25 and _is_vague_wording(sent):
-                    vagueness_warnings.append({
-                        "pii_category": cat.value,
-                        "margin":       round(margin, 4),
-                        # the whole statement: the violation quotes it, and
-                        # the client must see which sentence to rewrite
-                        "sentence":     quoted,
-                        "statement_no": statement_no.get(quoted),
-                        "top_label":    best_label,
-                        "top_score":    round(best_score, 4),
-                    })
+                # (The margin between the top-2 scores is NOT used for
+                # vagueness: it measures the classifier's uncertainty, not
+                # whether the policy's wording is specific.)
 
             # ── Keyword fallback ───────────────────────────────────────────
             if st_model is None:
@@ -1151,6 +1324,19 @@ def _pass2_extract_purposes(
 
         if cat_purposes:
             purpose_map[cat] = cat_purposes
+
+    # Rule 3(b)(ii) concerns the NOTICE: it must state the specified purpose
+    # of processing each item of personal data. A category for which some
+    # statement does state a specific purpose ("We use your phone number to
+    # send you OTPs") has one, even if another statement also uses generic
+    # wording ("… and to improve our services"). Only a category whose every
+    # purpose statement is generic is reported as vague.
+    # PRIVACYPILOT_VAGUENESS_SCOPE=statement restores the per-statement
+    # reading (every generic statement is reported, whatever else the policy
+    # says about the same data).
+    if vagueness_scope() == "notice":
+        vagueness_warnings = [w for w in vagueness_warnings
+                              if not specific_for.get(PIICategory(w["pii_category"]))]
 
     # Deduplicate vagueness warnings: one per (statement, PII category).
     # (It used to keep only the worst statement per category, so a second
@@ -1197,6 +1383,23 @@ _NEGATION_RE = re.compile(
     r"\b(?:not|never|no|neither|nor|don't|doesn't|won't|cannot|can't)\b"
 )
 _CLAUSE_BREAK_RE = re.compile(r",|\bbut\b|\bhowever\b|\bwhereas\b|\bexcept\b")
+
+
+_NEGATED_COLLECTION_RE = re.compile(
+    r"\b(?:not|never|no\s+longer|neither|nor|don't|doesn't|won't|cannot|can't)\s+"
+    r"(?:\w+\s+){0,3}?(?:collect|obtain|gather|store|record|retain|receive|access|ask\s+for|request|require|process|use)\w*\b"
+)
+
+
+def _negated_collection(sentence: str, phrase: str) -> bool:
+    """True when the phrase's clause negates a collection verb before it."""
+    m = re.search(r'(?<![a-z0-9])' + re.escape(phrase) + r'(?![a-z0-9])', sentence)
+    if not m:
+        return False
+    head = sentence[:m.start()]
+    breaks = [b.end() for b in _CLAUSE_BREAK_RE.finditer(head)]
+    clause = head[breaks[-1]:] if breaks else head
+    return bool(_NEGATED_COLLECTION_RE.search(clause))
 
 
 def _negated_before(sentence: str, pos: int) -> bool:

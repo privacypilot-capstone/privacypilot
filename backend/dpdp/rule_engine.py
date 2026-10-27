@@ -450,6 +450,12 @@ def run_dpdp_rules(
         locs = _locations(fs, with_sink=(kind == "log"), by_call=True)
         where = _locations_text(locs)
         notes = _origin_notes(fs)
+        if any(getattr(f, "source", None) == "scope_inference" for f in fs):
+            notes += (f" '{recipient}' analyses documents and images: the "
+                      f"'{cat.value}' data is not passed to it by name but is "
+                      f"handled in the same function that sends it a document "
+                      f"or image, so it is inferred to reach '{recipient}' as "
+                      f"part of that document.")
         rec_lower = recipient.lower()
         _disclosed_set = {s.lower() for s in (disclosed_sdks or {}).get(cat, set())}
         _named_for = sorted(
@@ -745,13 +751,20 @@ def run_dpdp_rules(
                 pii_category=cat,
                 evidence=(
                     f"{what}: "
-                    + (f"it uses stock wording that names no specified purpose "
-                       f"(e.g. 'improve our services', 'business purposes')"
-                       if worst.get("margin") is None else
-                       f"the classifier margin between the top-2 purpose "
+                    + (f"the classifier margin between the top-2 purpose "
                        f"categories is {worst.get('margin', 0):.3f}"
                        f"{' at its smallest' if n > 1 else ''} (threshold 0.08), "
-                       f"closest to '{worst.get('top_label', 'unknown')}'")
+                       f"closest to '{worst.get('top_label', 'unknown')}'"
+                       if worst.get("margin") is not None else
+                       (f"it uses stock wording that names no specified purpose "
+                        f"(e.g. 'improve our services', 'business purposes')"
+                        if all((x.get("reason") or "stock vague wording") == "stock vague wording"
+                               for x in ordered) else
+                        f"its purpose wording is generic (e.g. 'provide', 'operate', "
+                        f"'our services', 'the platform') and names no specified "
+                        f"purpose")
+                       + f", and no other statement in the policy states a "
+                         f"specific purpose for '{cat}' data")
                     + f". Rule 3(b)(ii) of DPDP Rules 2025 requires the notice to state "
                     f"the specified purpose in clear and plain language.{quote}"
                 ),

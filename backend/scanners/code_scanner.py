@@ -40,7 +40,8 @@ import re
 
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.presidio_scanner import scan_lines_with_presidio_spans, verhoeff_checksum_valid
-from scanners.sinks import canonical_sink, sink_kind, recipient_for_url, url_host
+from scanners.sinks import (canonical_sink, sink_kind, recipient_for_url, url_host,
+                            SINK_MODULE_TYPE, DOCUMENT_ANALYSIS_SDKS)
 
 # Bare schema / field-declaration lines (Django ORM `field = models.XField(...)`,
 # SQLAlchemy `col = Column(...)`, dataclass/pydantic `field: Type = Field(...)`,
@@ -73,7 +74,7 @@ SCAN_EXTS = PY_EXTS + JS_EXTS
 PII_PATTERNS = {
     PIICategory.AADHAAR:   r'aadhaar_number|aadhar_number|aadhaar_no|aadhar_no|aadhaar|aadhar',
     PIICategory.PAN:       r'pan_number|pan_card|pan_no|pancard',
-    PIICategory.PHONE:     r'phone_number|mobile_number|contact_number|mobile_no|phone_no|phone|mobile',
+    PIICategory.PHONE:     r'phone_number|mobile_number|contact_number|whatsapp_number|alternate_number|mobile_no|phone_no|contact_no|whatsapp_no|msisdn|phone|mobile',
     PIICategory.EMAIL:     r'email_address|user_email|email_id|email',
     # lat / lng / latlng: the usual short names of coordinates (latLng → lat_lng)
     # 'location' is also the browser / router location object
@@ -81,12 +82,17 @@ PII_PATTERNS = {
     # or server address: those are not a person's location.
     PIICategory.LOCATION:  (r'latitude|longitude|latlng|lat|lng|gps'
                             r'|(?<!window\.)(?<!document\.)location(?!\s*\.\s*(?:href|back|forward|go|path|pathname|reload|replace|hash|search|origin|host|hostname|protocol|assign|port)\b)(?!_?(?:strategy|service|href|path|change|state|listener))'
+                            r'|pincode|pin_code|zipcode|zip_code|postal_code|postcode|geolocation|geo_location'
                             r'|(?<!ip_)(?<!mac_)(?<!server_)(?<!host_)(?<!remote_)(?<!base_)(?<!socket_)(?<!wallet_)address'),
     # 'health' as in health checks, health endpoints and liveness probes is
     # service monitoring, not health data.
-    PIICategory.HEALTH:    r'blood_group|(?<!/)(?<!service_)(?<!server_)(?<!system_)(?<!app_)health(?!_?(?:check|z|endpoint|status|probe|ping|service|monitor|route|url|api|handler))|medical|diagnosis|disease',
-    PIICategory.FINANCIAL: r'bank_account|account_no|ifsc|credit_card|salary',
-    PIICategory.NAME:      r'full_name|first_name|last_name|username',
+    PIICategory.HEALTH:    r'blood_group|prescription|medication|allerg(?:y|ies)|symptoms?|(?<!/)(?<!service_)(?<!server_)(?<!system_)(?<!app_)health(?!_?(?:check|z|endpoint|status|probe|ping|service|monitor|route|url|api|handler))|medical|diagnosis|disease',
+    PIICategory.FINANCIAL: r'bank_account|account_number|account_no|ifsc|credit_card|debit_card|card_number|cvv|upi_id|vpa|iban|salary',
+    # A person's name: explicit name fields, and .name read from an object
+    # that is a person (user.name, student.name), not file.name / app.name.
+    PIICategory.NAME:      (r'full_name|first_name|last_name|middle_name|given_name|family_name|surname|display_name'
+                            r'|father_name|mother_name|guardian_name|username|user_name'
+                            r'|(?:user|customer|student|patient|person|member|employee|teacher|applicant|guardian|parent|account_holder|holder|beneficiary|nominee|learner|candidate)[._]name'),
     PIICategory.DOB:       r'date_of_birth|birth_date|birthdate|dob|year_of_birth|birth_year|yob',
     # A browser / device fingerprint (fingerprint_info, fingerprintjs) is a
     # device identifier, not a biometric.
@@ -379,7 +385,12 @@ MODULE_PATH_KEYWORDS = {
     'authentication':   ['auth', 'authentication', 'login', 'logout', 'signin', 'signup',
                          'oauth', 'jwt', 'session', 'token', 'kyc'],
     'payment':          ['payment', 'billing', 'invoice', 'stripe', 'razorpay', 'checkout'],
-    'notification':     ['notification', 'notify', 'push', 'fcm', 'apns', 'sms', 'email', 'mailer'],
+    # A bare "email" path token names the DATA ("signup-email-password",
+    # "update-email.component") far more often than code that sends e-mail,
+    # so only e-mail-sending names count.
+    'notification':     ['notification', 'notify', 'push', 'fcm', 'apns', 'sms', 'mailer',
+                         'email_service', 'email_sender', 'email_template', 'mail_service',
+                         'send_email', 'smtp'],
     'database':         ['model', 'schema', 'migration', 'repository', 'dao', 'db'],
     'api':              ['api', 'route', 'router', 'endpoint', 'controller', 'handler', 'view'],
     'storage':          ['storage', 'upload', 's3', 'blob', 'file', 'bucket'],
@@ -433,6 +444,23 @@ def _token_match(tokens: list[str], keyword: str) -> bool:
     return False
 
 
+_JS_FUNC_NAME_RES = [
+    re.compile(r'\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\('),
+    re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^()]*\)\s*(?::\s*[^=]+)?=>|[A-Za-z_$][\w$]*\s*=>)'),
+    re.compile(r'^[ \t]*(?:(?:public|private|protected|static|async|override|readonly)\s+)*([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*(?::\s*[^{;=]+)?\{', re.M),
+]
+_JS_NOT_FUNC = {'if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'constructor', 'super'}
+
+
+def _js_function_names(source_text: str) -> set[str]:
+    names: set[str] = set()
+    for rx in _JS_FUNC_NAME_RES:
+        for m in rx.finditer(source_text):
+            if m.group(1) not in _JS_NOT_FUNC:
+                names.add(m.group(1))
+    return names
+
+
 def classify_module(file_path: str, source_text: str) -> set[str]:
     """
     Return a set of module-type labels for a file, using:
@@ -449,6 +477,16 @@ def classify_module(file_path: str, source_text: str) -> set[str]:
     for module_type, keywords in MODULE_PATH_KEYWORDS.items():
         if any(_token_match(path_tokens, kw) for kw in keywords):
             labels.add(module_type)
+
+    # Function-name pass, JavaScript / TypeScript: declared functions,
+    # methods and functions assigned to names (token keywords only; the
+    # one-word EXACT names such as get/post/save are too common in JS).
+    if file_path.endswith(JS_EXTS):
+        for fn in _js_function_names(source_text):
+            fn_tokens = _tokens(fn)
+            for module_type, kws in MODULE_FUNC_TOKENS.items():
+                if any(_token_match(fn_tokens, kw) for kw in kws):
+                    labels.add(module_type)
 
     # AST function-name pass (Python only)
     if file_path.endswith(PY_EXTS):
@@ -560,7 +598,22 @@ def _package_sink(name: str) -> str | None:
     else:
         top = re.split(r'[./]', name)[0]
     top = top.replace('-', '.')
-    return canonical_sink(top + '(') or canonical_sink(top + '.')
+    label = canonical_sink(top + '(') or canonical_sink(top + '.')
+    if label:
+        return label
+    # Scoped or nested packages whose SDK is named by the full path, not the
+    # scope: @google-cloud/vision, @aws-sdk/client-s3, @azure/storage-blob,
+    # google.cloud.vision. Only SDK labels count here (a path containing
+    # "log" or "fetch" is not a logger or an HTTP call).
+    # Only scoped npm packages (@scope/pkg) and the vendors' namespace
+    # packages qualify; a project's own "services.analytics" never does, and
+    # the generic labels "analytics" / "segment" are never taken from a path.
+    if not (name.startswith('@') or re.match(r'(?:google\.cloud|azure|aws)\.', name)):
+        return None
+    full = canonical_sink(name.lstrip('@') + '(')
+    if not full or sink_kind(full) != 'sdk' or full in ('analytics', 'segment'):
+        return None
+    return full
 
 
 def _py_root_name(node) -> str | None:
@@ -586,9 +639,12 @@ def _python_sdk_aliases(tree) -> dict[str, str]:
                     aliases[a.asname or a.name.split('.')[0]] = label
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             label = _package_sink(node.module)
-            if label:
-                for a in node.names:
-                    aliases[a.asname or a.name] = label
+            for a in node.names:
+                # `from google.cloud import vision`: the SDK is named by the
+                # module AND the imported name together
+                lbl = label or _package_sink(f"{node.module}.{a.name}")
+                if lbl:
+                    aliases[a.asname or a.name] = lbl
     for _ in range(5):                       # propagate through assignments
         changed = False
         for node in ast.walk(tree):
@@ -749,6 +805,109 @@ def _python_call_sinks(source_text: str) -> dict[int, str] | None:
     return by_line
 
 
+# ── Scope-aware taint store ──────────────────────────────────────────────────
+# Taint used to be keyed by variable NAME for the whole file: one
+# `res = api.get(user.email)` in one function tainted every `res` in every
+# function of the file, and an assignment such as `this.profile = …` tainted
+# the name `this`, so every `console.log(this.x)` in the class became a
+# personal-data log. Now:
+#   - a variable assigned inside a function is tainted in that function
+#     (and functions nested in it), not in its siblings;
+#   - `this` / `self` / `cls` are never tainted themselves; an assignment to
+#     a field (`this.profile = …`, `self.user = …`) taints that field PATH,
+#     which is visible to every method of the file (fields are shared);
+#   - names that are PII words (`email`, `phoneNumber`) carry their own
+#     categories everywhere, as before.
+_RECEIVER_NAMES = {"this", "self", "cls"}
+
+
+class _TaintStore:
+    def __init__(self, ranges: list[tuple[int, int]]):
+        self.ranges = sorted(ranges, key=lambda r: (r[1] - r[0]))   # innermost first
+        self.local: dict[tuple, set[PIICategory]] = {}
+        self.paths: dict[str, set[PIICategory]] = {}
+
+    def scope(self, line: int):
+        for r in self.ranges:
+            if r[0] <= line <= r[1]:
+                return r
+        return None
+
+    def chain(self, line: int) -> list:
+        return [r for r in self.ranges if r[0] <= line <= r[1]] + [None]
+
+    def add(self, name: str, line: int, cats: set[PIICategory]) -> bool:
+        name = name.lower()
+        if not cats or name in _RECEIVER_NAMES:
+            return False
+        cur = self.local.setdefault((self.scope(line), name), set())
+        if cats <= cur:
+            return False
+        cur |= cats
+        return True
+
+    def get(self, name: str, line: int) -> set[PIICategory]:
+        name = name.lower()
+        for sc in self.chain(line):
+            if (sc, name) in self.local:
+                return self.local[(sc, name)]
+        return set()
+
+    def add_path(self, path: str, cats: set[PIICategory]) -> bool:
+        path = re.sub(r'\s+', '', path).replace('?.', '.').lower()
+        if not cats or '.' not in path:
+            return False
+        cur = self.paths.setdefault(path, set())
+        if cats <= cur:
+            return False
+        cur |= cats
+        return True
+
+    def get_path(self, path: str) -> set[PIICategory]:
+        path = re.sub(r'\s+', '', path).replace('?.', '.').lower()
+        out: set[PIICategory] = set()
+        for p, cats in self.paths.items():
+            if path == p or path.startswith(p + '.'):
+                out |= cats
+        return out
+
+
+def _seed_store(store: _TaintStore, lines: list[str], line_findings, lang: str) -> None:
+    """Scoped counterpart of _seed_taint: the variable ASSIGNED on a PII line
+    is tainted in that line's function (identifiers that are PII words carry
+    their own categories wherever they are used, see _own_pii)."""
+    line_cats: dict[int, set[PIICategory]] = {}
+    for line_num, cat in line_findings:
+        line_cats.setdefault(line_num, set()).add(cat)
+    for line_num, cats in line_cats.items():
+        if not (0 < line_num <= len(lines)):
+            continue
+        code = _strip_inline_comment(lines[line_num - 1], lang)
+        m = _ASSIGN_LHS_RE.match(code)
+        if m:
+            store.add(m.group(1), line_num, cats)
+
+
+def _py_scoped_cats(node, store: _TaintStore) -> set[PIICategory]:
+    """PII categories a Python expression may carry, resolved in scope."""
+    out: set[PIICategory] = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out |= store.get(n.id, getattr(n, 'lineno', 0))
+            out |= _own_pii(n.id)
+        elif isinstance(n, ast.Attribute):
+            out |= _own_pii(n.attr)
+            try:
+                out |= store.get_path(ast.unparse(n))
+            except Exception:
+                pass
+        elif isinstance(n, ast.Subscript):
+            sl = n.slice
+            if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+                out |= _own_pii(sl.value)
+    return out
+
+
 def _py_expr_cats(node, tainted: dict[str, set[PIICategory]]) -> set[PIICategory]:
     """PII categories an expression may carry: tainted variable names, PII
     field reads (`patient.blood_group`) and PII keys (`data['email']`)."""
@@ -789,12 +948,13 @@ def _python_taint_analysis(
         return taint_findings
 
     lines = source_text.splitlines()
-    tainted = _seed_taint(lines, line_findings, 'py')
-
     try:
         tree = ast.parse(source_text)
     except (SyntaxError, ValueError):
         return taint_findings
+    store = _TaintStore([(n.lineno, n.end_lineno or n.lineno) for n in ast.walk(tree)
+                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))])
+    _seed_store(store, lines, line_findings, 'py')
 
     for _ in range(5):
         changed = False
@@ -803,16 +963,19 @@ def _python_taint_analysis(
                 value = getattr(node, 'value', None)
                 if value is None:
                     continue
-                cats = _py_expr_cats(value, tainted)
+                cats = _py_scoped_cats(value, store)
                 if not cats:
                     continue
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for tgt in targets:
-                    if isinstance(tgt, ast.Name):
-                        cur = tainted.setdefault(tgt.id.lower(), set())
-                        if not cats <= cur:
-                            cur |= cats
-                            changed = True
+                    for t in (tgt.elts if isinstance(tgt, (ast.Tuple, ast.List)) else [tgt]):
+                        if isinstance(t, ast.Name):
+                            changed |= store.add(t.id, node.lineno, cats)
+                        elif isinstance(t, ast.Attribute):
+                            try:
+                                changed |= store.add_path(ast.unparse(t), cats)
+                            except Exception:
+                                pass
         if not changed:
             break
 
@@ -826,7 +989,7 @@ def _python_taint_analysis(
             continue
         cats: set[PIICategory] = set()
         for arg in list(node.args) + [kw.value for kw in node.keywords]:
-            cats |= _py_expr_cats(arg, tainted)
+            cats |= _py_scoped_cats(arg, store)
         call_line = getattr(node, 'lineno', 0)
         raw = _snippet(lines[call_line - 1] if 0 < call_line <= len(lines) else "")
         for cat in sorted(cats, key=lambda c: c.value):
@@ -977,6 +1140,11 @@ def _js_call_sinks(source_text: str) -> dict[int, str] | None:
     return by_line
 
 
+_JS_FUNCTION_NODES = ("function_declaration", "function", "function_expression", "arrow_function",
+                      "method_definition", "generator_function_declaration")
+_JS_PATH_RE = re.compile(r'[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*')
+
+
 def _js_taint_analysis(
     source_text: str,
     file_path: str,
@@ -1005,21 +1173,29 @@ def _js_taint_analysis(
 
     src_bytes = bytes(source_text, "utf-8")
     lines = source_text.splitlines()
-    tainted = _seed_taint(lines, line_findings, 'js')
+    store = _TaintStore([(n.start_point[0] + 1, n.end_point[0] + 1) for n in _ts_walk(tree.root_node)
+                         if n.type in _JS_FUNCTION_NODES])
+    _seed_store(store, lines, line_findings, 'js')
     aliases = _js_sdk_aliases(source_text)
     consts = _js_str_constants(source_text)
 
     def _node_text(node) -> str:
         return src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
 
-    def _text_cats(text: str) -> set[PIICategory]:
+    def _text_cats(text: str, line: int) -> set[PIICategory]:
         # blank string contents so words inside literals don't count
-        for s, e in reversed(_string_spans(text, 'js')):
-            text = text[:s] + ' ' * (e - s) + text[e:]
+        for s_, e_ in reversed(_string_spans(text, 'js')):
+            text = text[:s_] + ' ' * (e_ - s_) + text[e_:]
         out: set[PIICategory] = set()
-        for ident in _IDENT_RE.findall(text):
-            out |= tainted.get(ident.lower(), set())
-            out |= _own_pii(ident)
+        for m in _JS_PATH_RE.finditer(text):
+            expr = m.group(0)
+            parts = re.split(r'\s*\??\.\s*', expr)
+            if not (m.start() > 0 and text[m.start() - 1] == '.'):
+                out |= store.get(parts[0], line)          # a variable, in scope
+            for part in parts:
+                out |= _own_pii(part)
+            if len(parts) > 1:
+                out |= store.get_path(expr)
         return out
 
     for _ in range(5):
@@ -1031,14 +1207,15 @@ def _js_taint_analysis(
             rhs = node.child_by_field_name("value") or node.child_by_field_name("right")
             if lhs is None or rhs is None:
                 continue
-            cats = _text_cats(_node_text(rhs))
+            line = node.start_point[0] + 1
+            cats = _text_cats(_node_text(rhs), line)
             if not cats:
                 continue
-            for ident in _IDENT_RE.findall(_node_text(lhs)):
-                cur = tainted.setdefault(ident.lower(), set())
-                if not cats <= cur:
-                    cur |= cats
-                    changed = True
+            if lhs.type == "member_expression":
+                changed |= store.add_path(_node_text(lhs), cats)
+            else:      # identifier, or a destructuring pattern
+                for ident in _IDENT_RE.findall(_node_text(lhs)):
+                    changed |= store.add(ident, line, cats)
         if not changed:
             break
 
@@ -1054,7 +1231,7 @@ def _js_taint_analysis(
             continue
         line_no = node.start_point[0] + 1
         raw = _snippet(lines[line_no - 1] if line_no - 1 < len(lines) else "")
-        for cat in sorted(_text_cats(_node_text(args)), key=lambda c: c.value):
+        for cat in sorted(_text_cats(_node_text(args), line_no), key=lambda c: c.value):
             taint_findings.append({
                 "file_path":    file_path,
                 "line_number":  line_no,
@@ -1064,6 +1241,73 @@ def _js_taint_analysis(
             })
 
     return taint_findings
+
+
+def _finding_modules(file_module_types: set[str], sink: str | None) -> set[str]:
+    """Module types of one finding: the file's, plus the purpose its sink
+    serves (personal data sent to an analytics SDK is analytics use)."""
+    extra = SINK_MODULE_TYPE.get((sink or "").lower())
+    return set(file_module_types) | ({extra} if extra else set())
+
+
+def _function_ranges(source_text: str, is_py: bool, is_js: bool) -> list[tuple[int, int]]:
+    """(first, last) line of every function / method in the file."""
+    out: list[tuple[int, int]] = []
+    if is_py:
+        try:
+            tree = ast.parse(source_text)
+        except (SyntaxError, ValueError):
+            return out
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.append((n.lineno, n.end_lineno or n.lineno))
+    elif is_js:
+        tree = _js_parse(source_text)
+        if tree is None:
+            return out
+        for n in _ts_walk(tree.root_node):
+            if n.type in ("function_declaration", "function", "function_expression",
+                          "arrow_function", "method_definition", "generator_function_declaration"):
+                out.append((n.start_point[0] + 1, n.end_point[0] + 1))
+    return out
+
+
+def _document_sdk_inferences(source_text, lines, call_sinks, findings, is_py, is_js) -> list[dict]:
+    """
+    A document-analysis (OCR) service receives an identity document as an
+    image or file, so the personal data on it never appears as a named
+    argument and taint analysis cannot see it. When a function both handles
+    personal-data categories and calls such a service, each category handled
+    in that function is reported as sent to the service, at the call. The
+    scope is the innermost enclosing function only — not the whole file — so
+    unrelated code elsewhere in the file is not attributed to the call.
+    """
+    calls: dict[int, str] = {}
+    if call_sinks is not None:
+        cl = getattr(call_sinks, "call_line", {})
+        for ln, label in call_sinks.items():
+            if label in DOCUMENT_ANALYSIS_SDKS:
+                calls.setdefault(cl.get(ln, ln), label)
+    else:
+        for i, line in enumerate(lines, 1):
+            label = canonical_sink(line)
+            if label in DOCUMENT_ANALYSIS_SDKS:
+                calls.setdefault(i, label)
+    if not calls:
+        return []
+    ranges = _function_ranges(source_text, is_py, is_js)
+    out: list[dict] = []
+    for call, label in sorted(calls.items()):
+        enclosing = [r for r in ranges if r[0] <= call <= r[1]]
+        if not enclosing:
+            continue
+        lo, hi = min(enclosing, key=lambda r: r[1] - r[0])
+        already = {f.pii_category for f in findings
+                   if f.third_party_sdk == label and lo <= f.line_number <= hi}
+        cats = {f.pii_category for f in findings if lo <= f.line_number <= hi} - already
+        for cat in sorted(cats, key=lambda c: c.value):
+            out.append({"line": call, "cat": cat, "sink": label})
+    return out
 
 
 def _scan_single_file(
@@ -1112,6 +1356,7 @@ def _scan_single_file(
         _pass2_pending: list[tuple[int, str, str, str | None]] = []
 
         def _add(source, line_num, raw, field, cat, sens, sink):
+            mods = _finding_modules(file_module_types, sink)
             file_findings.append(DataFlowObject(
                 source=source,
                 file_path=file_obj.path,
@@ -1121,12 +1366,12 @@ def _scan_single_file(
                 pii_category=cat,
                 sensitivity=sens,
                 third_party_sdk=sink,
-                module_types=sorted(file_module_types),
+                module_types=sorted(mods),
                 call_line=(_call_sinks.call_line.get(line_num)
                            if sink and isinstance(_call_sinks, _LineSinks) else None),
             ))
             line_pii.append((line_num, cat))
-            file_usage_map.setdefault(cat, set()).update(file_module_types)
+            file_usage_map.setdefault(cat, set()).update(mods)
 
         for line_num, line in enumerate(lines, 1):
             stripped = line.strip()
@@ -1260,10 +1505,27 @@ def _scan_single_file(
                 pii_category=cat,
                 sensitivity=SENSITIVITY_MAP.get(cat, Sensitivity.UNKNOWN),
                 third_party_sdk=tr["sink"],   # canonical label from sinks.py
-                module_types=sorted(file_module_types),
+                module_types=sorted(_finding_modules(file_module_types, tr["sink"])),
                 call_line=tr["line_number"],  # taint findings sit on the call's first line
             ))
-            file_usage_map.setdefault(cat, set()).update(file_module_types)
+            file_usage_map.setdefault(cat, set()).update(
+                _finding_modules(file_module_types, tr["sink"]))
+
+        # ── Document-analysis services (OCR) ─────────────────────────
+        for inf in _document_sdk_inferences(source_text, lines, _call_sinks, file_findings,
+                                            is_py, is_js):
+            file_findings.append(DataFlowObject(
+                source="scope_inference",
+                file_path=file_obj.path,
+                line_number=inf["line"],
+                raw_text=_snippet(lines[inf["line"] - 1]),
+                field_name=inf["cat"].value,
+                pii_category=inf["cat"],
+                sensitivity=SENSITIVITY_MAP.get(inf["cat"], Sensitivity.UNKNOWN),
+                third_party_sdk=inf["sink"],
+                module_types=sorted(_finding_modules(file_module_types, inf["sink"])),
+                call_line=inf["line"],
+            ))
 
     except Exception as e:
         if raise_errors:      # scan_github_repo counts it in coverage["failed"]

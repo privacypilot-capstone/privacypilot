@@ -67,6 +67,10 @@ services:
       - OPENBLAS_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - TOKENIZERS_PARALLELISM=false
+      # Detection settings (see README, "Checks"). VAGUENESS_SCOPE: notice | statement
+      - PRIVACYPILOT_VAGUENESS_SCOPE=${PRIVACYPILOT_VAGUENESS_SCOPE:-notice}
+      - PRIVACYPILOT_INCLUDE_TEST_CODE=${PRIVACYPILOT_INCLUDE_TEST_CODE:-0}
+      - PRIVACYPILOT_INCLUDE_EXAMPLE_CODE=${PRIVACYPILOT_INCLUDE_EXAMPLE_CODE:-0}
     depends_on:
       db:
         condition: service_healthy

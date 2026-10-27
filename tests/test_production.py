@@ -283,8 +283,11 @@ def test_bullet_exclusions_now_match():
 
 
 def test_bullets_still_detected():
-    text = "We collect:\n• Aadhaar number\n• Phone number\n• IP address\n• Fingerprint scans\n"
+    text = "We collect:\n• Aadhaar number\n• Phone number\n• Home address\n• Fingerprint scans\n"
     assert {P.AADHAAR, P.PHONE, P.LOCATION, P.BIOMETRIC} <= policy_cats(text)
+    # an IP address is a device identifier, not a person's location (the
+    # code scanner excludes ip_address from location in the same way)
+    assert P.LOCATION not in policy_cats("We collect:\n• IP address\n")
 
 
 # ── End-to-end Rule 3 on the healthtech scenario (production code) ────────────
@@ -1975,3 +1978,132 @@ def test_I9_device_fingerprint_dea_numbers_and_generic_sdk_words_in_bundles():
     assert run_dpdp_rules([f], [], set()) == []
     g = finding(P.NAME, "mixpanel", "x", "vendor/sdk.js", 1); g.origin = "third_party"
     assert [v.recipient for v in run_dpdp_rules([g], [], set())] == ["mixpanel"]
+
+
+
+# ── V: notice-level vagueness, specificity, generic improvements ─────────────
+
+@pytest.mark.parametrize("sentence,kind", [
+    ("We collect your email address to provide and improve our services.", "stock"),
+    ("We collect your email address for business purposes.", "stock"),
+    ("We use your data to operate and maintain the platform.", "vague"),
+    ("We use your data to provide, personalise and market our services", "vague"),
+    ("We use your name to personalise your experience.", "specific"),
+    ("We use your phone number to send you OTPs and transaction alerts.", "specific"),
+    ("We use your information to: Verify your identity", "specific"),
+    ("We process your PAN to comply with KYC regulations.", "specific"),
+    ("Your email address is shared with Twilio solely for this purpose.", "none"),
+    ("We collect your email address.", "none"),
+    ("By using the Website you agree to the terms of this Privacy Policy and consent "
+     "to the use of your information.", "none"),
+])
+def test_V1_purpose_statement_specificity(sentence, kind):
+    assert pp.purpose_statement_kind(sentence) == kind
+
+
+def test_V2_vagueness_is_judged_for_the_whole_notice(monkeypatch):
+    monkeypatch.setattr(pp, "_get_nlp", lambda: None)
+    monkeypatch.setattr(pp, "_get_st_model", lambda: (None, None))
+    vague_only = "We use your email address to improve our services."
+    _, w = pp._pass2_extract_purposes(vague_only.lower(), {P.EMAIL}, full_text_raw=vague_only)
+    assert [x["pii_category"] for x in w] == ["email"]
+    # the same generic sentence next to a specific purpose for the same data
+    both = vague_only + " We use your email address to send you payment receipts."
+    _, w = pp._pass2_extract_purposes(both.lower(), {P.EMAIL}, full_text_raw=both)
+    assert w == []
+
+
+def test_V3_classifier_margin_alone_is_not_vagueness(monkeypatch):
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(pp, "_get_st_model", lambda: (_FakeST(), np.eye(6)))
+    text = ("We use this information to administer the account and provide the "
+            "highest possible level of security to you.")
+    _, w = pp._pass2_extract_purposes(text.lower(), {P.EMAIL}, full_text_raw=text)
+    assert w == []          # 'security' and 'account' are specific
+
+
+def test_V4_policy_disclosure_negation_and_non_personal_senses():
+    assert P.AADHAAR not in policy_cats("We do not collect your Aadhaar number.")
+    assert P.LOCATION not in policy_cats("We will address your grievances within 30 days.")
+    assert P.LOCATION not in policy_cats("We collect your IP address to secure your account.")
+    assert P.LOCATION not in policy_cats("We store data in server locations in India.")
+    assert P.FINANCIAL not in policy_cats("We share data with banks and financial institutions.")
+    assert P.LOCATION in policy_cats("We collect your home address to deliver orders.")
+
+
+def test_V5_example_code_does_not_produce_violations(monkeypatch):
+    from scanners.test_paths import is_example_path, counts_for_rules
+    assert is_example_path("examples/index.js") and is_example_path("samples/app/main.py")
+    assert not is_example_path("src/example_service.py")
+    assert not counts_for_rules("examples/index.js")
+    monkeypatch.setenv("PRIVACYPILOT_INCLUDE_EXAMPLE_CODE", "1")
+    assert counts_for_rules("examples/index.js")
+
+
+def test_V6_email_in_a_path_names_data_not_a_notification_module():
+    assert "notification" not in cs.classify_module("src/app/signup-email-password/page.ts", "")
+    assert "notification" in cs.classify_module("services/email_service.py", "")
+    assert "analytics" in cs.classify_module("src/x.ts", "export function trackSignup(u) {}\n")
+
+
+def test_V7_sink_gives_the_purpose_of_use():
+    f, usage = scan("services/user.py", "def on_signup(user):\n    mixpanel.track(user.email, 'signup')\n")
+    assert "analytics" in usage[P.EMAIL]
+    assert any(x.third_party_sdk == "mixpanel" and "analytics" in x.module_types for x in f)
+
+
+def test_V8_scoped_and_namespace_packages_resolve_to_their_sdk():
+    pytest.importorskip("tree_sitter_javascript")
+    src = ("import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';\n"
+           "const s3 = new S3Client({});\n"
+           "async function up(user) { await s3.send(new PutObjectCommand({Body: user.email})); }\n")
+    assert (P.EMAIL, "aws-s3") in _sinks(scan("src/upload.js", src)[0])
+    import ast as _ast
+    assert cs._python_sdk_aliases(_ast.parse("from google.cloud import vision\n")) == {"vision": "google-cloud-vision"}
+    assert cs._python_sdk_aliases(_ast.parse("from services import analytics\n")) == {}
+
+
+def test_V9_document_analysis_service_receives_the_document_data():
+    pytest.importorskip("tree_sitter_javascript")
+    src = ('import vision from "@google-cloud/vision";\n'
+           "const client = new vision.ImageAnnotatorClient();\n"
+           "export async function readAadhaar(image) {\n"
+           "  const [res] = await client.textDetection(image);\n"
+           "  const aadhaarNumber = parse(res);\n"
+           "  return { aadhaarNumber };\n}\n"
+           "function other(user) { return user.email; }\n")
+    f = scan("src/ocr.ts", src)[0]
+    inferred = {(x.pii_category, x.third_party_sdk) for x in f if x.source == "scope_inference"}
+    assert inferred == {(P.AADHAAR, "google-cloud-vision")}      # not the e-mail in other()
+    v = run_dpdp_rules(f, [], set())
+    tx = [x for x in v if x.dpdp_section == "Section 8(2)"]
+    assert [x.pii_category for x in tx] == ["aadhaar"] and "inferred" in tx[0].evidence
+
+
+def test_V10_taint_is_scoped_to_the_function():
+    pytest.importorskip("tree_sitter_javascript")
+    src = ("function a(user) {\n  const res = api.get(user.email);\n  return res;\n}\n"
+           "function b() {\n  const res = load();\n  console.log(res);\n}\n"
+           "function c(user) {\n  const res = api.get(user.email);\n  console.log(res);\n}\n")
+    logged = {(x.line_number, x.pii_category) for x in scan("src/a.js", src)[0]
+              if x.third_party_sdk == "console.log"}
+    assert logged == {(11, P.EMAIL)}          # not line 7: b's `res` is another variable
+
+
+def test_V11_this_is_never_tainted_but_its_fields_are():
+    pytest.importorskip("tree_sitter_javascript")
+    src = ("class P {\n  load(u) {\n    this.profile = u.phoneNumber;\n  }\n"
+           "  show() {\n    console.log(this.title);\n    console.log(this.profile);\n  }\n}\n")
+    logged = {(x.line_number, x.pii_category) for x in scan("src/p.ts", src)[0]
+              if x.third_party_sdk == "console.log"}
+    assert logged == {(7, P.PHONE)}
+
+
+def test_V12_python_taint_is_scoped_and_follows_self_fields():
+    src = ("def a(user):\n    data = user.email\n    return data\n\n"
+           "def b():\n    data = load()\n    print(data)\n\n"
+           "class S:\n    def set(self, u):\n        self.contact = u.phone_number\n"
+           "    def show(self):\n        print(self.contact)\n        print(self.name_of_app)\n")
+    logged = {(x.line_number, x.pii_category) for x in scan("svc.py", src)[0]
+              if x.third_party_sdk == "print"}
+    assert logged == {(13, P.PHONE)}

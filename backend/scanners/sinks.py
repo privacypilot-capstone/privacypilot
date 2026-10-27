@@ -50,12 +50,33 @@ SDK_RULES: list[tuple[re.Pattern, str]] = [
     # files leave the application through them. (Sign-in SDKs such as Google
     # or Apple sign-in and reCAPTCHA are not sinks: the user's data comes FROM
     # them, or only a token is sent.)
-    (re.compile(_L + r'(?:ImageAnnotatorClient|google-cloud/vision|cloud\s+import\s+vision|vision\.googleapis)', re.I), 'google-cloud-vision'),
+    (re.compile(_L + r'(?:ImageAnnotatorClient|google-cloud/vision|google\.cloud\.vision|cloud\s+import\s+vision|vision\.googleapis)', re.I), 'google-cloud-vision'),
     (re.compile(_L + r'(?:FCMPlugin|FirebaseMessaging|getMessaging\s*\()', re.I), 'firebase'),
     (re.compile(_L + r'(?:S3Client|PutObjectCommand|put_object\s*\(|upload_fileobj\s*\(|aws-sdk/client-s3)', re.I), 'aws-s3'),
-    (re.compile(_L + r'(?:BlobServiceClient|uploadBlockBlob|BlockBlobClient)', re.I), 'azure-blob'),
-    (re.compile(_L + r'(?:google-cloud/storage|storage\s*\.\s*Client\s*\()', re.I), 'gcs'),
+    (re.compile(_L + r'(?:BlobServiceClient|uploadBlockBlob|BlockBlobClient|azure/storage-blob|azure\.storage\.blob)', re.I), 'azure-blob'),
+    (re.compile(_L + r'(?:google-cloud/storage|google\.cloud\.storage|storage\s*\.\s*Client\s*\()', re.I), 'gcs'),
+    # Document-analysis (OCR) services of the other major clouds
+    (re.compile(_L + r'(?:TextractClient|aws-sdk/client-textract|AnalyzeDocumentCommand|DetectDocumentTextCommand|client\s*\(\s*[\'"]textract[\'"]|analyze_document\s*\(|detect_document_text\s*\()', re.I), 'aws-textract'),
+    (re.compile(_L + r'(?:DocumentAnalysisClient|ai-form-recognizer|ai-document-intelligence|FormRecognizerClient|DocumentIntelligenceClient|begin_analyze_document\s*\()', re.I), 'azure-document-intelligence'),
 ]
+
+# Purpose that sending data to a sink serves (Rule 3): personal data passed
+# to an analytics SDK is used for analytics wherever the calling code lives,
+# to an SMS / e-mail provider for communication, to cloud storage for
+# storage. Recorded as the module type of that finding. SDKs with several
+# roles (Firebase: database, auth, messaging, analytics) are not mapped.
+SINK_MODULE_TYPE: dict[str, str] = {
+    'mixpanel': 'analytics', 'amplitude': 'analytics', 'segment': 'analytics',
+    'analytics': 'analytics', 'clevertap': 'analytics',
+    'twilio': 'notification', 'sendgrid': 'notification',
+    'aws-s3': 'storage', 'azure-blob': 'storage', 'gcs': 'storage',
+}
+
+# Services that read the contents of a document or image sent to them (OCR):
+# the personal data on an identity document reaches them as an image or file,
+# not as a named variable, so taint analysis cannot see it (see
+# code_scanner._document_sdk_inferences).
+DOCUMENT_ANALYSIS_SDKS = {'google-cloud-vision', 'aws-textract', 'azure-document-intelligence'}
 
 # ── Outbound HTTP (Rule 2a) ──────────────────────────────────────────────────
 HTTP_RULES: list[tuple[re.Pattern, str]] = [
@@ -223,6 +244,8 @@ SDK_DISCLOSURE_PATTERNS: dict[str, re.Pattern] = {
     'aws-s3':      re.compile(r'\b(?:amazon\s+s3|aws\s+s3|amazon\s+web\s+services)\b'),
     'azure-blob':  re.compile(r'\b(?:microsoft\s+)?azure\b'),
     'gcs':         re.compile(r'\bgoogle\s+cloud(?:\s+storage|\s+platform)?\b'),
+    'aws-textract': re.compile(r'\b(?:amazon|aws)\s+textract\b'),
+    'azure-document-intelligence': re.compile(r'\b(?:azure\s+)?(?:form\s+recognizer|document\s+intelligence)\b'),
     # external logging / monitoring services (EXTERNAL_LOGGER_LABELS)
     'sentry':      re.compile(r'\bsentry\b'),
     'datadog':     re.compile(r'\bdatadog\b'),
