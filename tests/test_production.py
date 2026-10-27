@@ -2107,3 +2107,71 @@ def test_V12_python_taint_is_scoped_and_follows_self_fields():
     logged = {(x.line_number, x.pii_category) for x in scan("svc.py", src)[0]
               if x.third_party_sdk == "print"}
     assert logged == {(13, P.PHONE)}
+
+
+# ---- TypeScript parsing and chained-call sink labelling --------------------
+
+def _ts_sinks(src, path):
+    from scanners import code_scanner as cs
+    return cs._js_call_sinks(src, path)
+
+
+def test_ts_generics_do_not_produce_bogus_sinks():
+    src = "const x = new Map<string, Array<number>>();\nfunction f(a: Array<string>) { return a.length; }\n"
+    from scanners import code_scanner as cs
+    labels = [s for s in (_ts_sinks(src, "a.ts") or [])]
+    assert not any("console" in str(l) or "http" in str(l) for l in labels)
+
+
+def test_chained_call_label_ignores_callback_body():
+    from scanners import code_scanner as cs
+    import tree_sitter  # noqa: F401
+    tree = cs._js_parse("svc.load(r).then(async (d) => { console.log(d); });", "a.ts")
+    src = b"svc.load(r).then(async (d) => { console.log(d); });"
+    call = tree.root_node.children[0].children[0]
+    text = cs._js_callee_text(call.child_by_field_name("function"), src)
+    assert "console" not in text and text.endswith(".then")
+
+
+def test_minified_bundle_scans_in_bounded_time():
+    """A one-line bundle with thousands of nested functions must not make the
+    taint analysis quadratic (it once exceeded the chunk time limit)."""
+    import time
+    from scanners import code_scanner as cs
+    body = "var email=a.email;" + "".join(
+        "function f%d(x){var y%d=x.email;return function(z){return y%d+z}}" % (i, i, i)
+        for i in range(3000)) + "console.log(email);"
+    src = "(function(){" + body + "})();"
+    t = time.time()
+    cs._js_taint_analysis(src, "bundle.min.js", [(1, cs.PIICategory.EMAIL)])
+    assert time.time() - t < 20
+
+
+def test_service_health_status_and_embedded_blobs_are_not_pii():
+    from scanners import code_scanner as cs
+    assert not cs._own_pii("CASSANDRA_HEALTH_FAILED")
+    assert cs.PIICategory.HEALTH in cs._own_pii("patient_health")
+    blob = "const icon = 'data:image/png;base64," + "aQBANk/IBANvpa+Z" * 40 + "';"
+    assert not cs._pass1_categories(cs._normalise_identifiers(cs._blank_encoded_blobs(blob)))
+    assert cs.PIICategory.FINANCIAL in cs._pass1_categories(cs._normalise_identifiers("account_number = 1"))
+
+
+def test_service_health_identifiers_are_not_medical_data():
+    from scanners import code_scanner as cs
+    for t in ("checkPortalHealth", "checkDatabaseHealth", "portal.health.api", "Health Service is unavailable"):
+        assert not cs._own_pii(t), t
+    for t in ("patient_health", "healthRecords", "user.health"):
+        assert cs.PIICategory.HEALTH in cs._own_pii(t), t
+
+
+def test_minified_content_is_generated_even_with_ordinary_name():
+    from scanners import code_scanner as cs
+    class C:  # noqa
+        def __init__(s, t): s.decoded_content = t.encode()
+    class R:
+        def __init__(s, t): s.t = t
+        def get_contents(s, p): return C(s.t)
+    body = "var a=1;" * 700 + "console.log(user.email);"          # one 5.6 KB line
+    ordinary = "const email = user.email;\nconsole.log(email);\n"
+    assert cs._looks_minified(body) and not cs._looks_minified(ordinary)
+    assert not cs._own_pii("healthResponse") and cs.PIICategory.HEALTH in cs._own_pii("health_data")

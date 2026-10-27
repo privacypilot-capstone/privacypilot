@@ -36,6 +36,7 @@ cap and no whole-scan deadline here.
 """
 
 import ast
+import functools
 import re
 
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
@@ -86,7 +87,7 @@ PII_PATTERNS = {
                             r'|(?<!ip_)(?<!mac_)(?<!server_)(?<!host_)(?<!remote_)(?<!base_)(?<!socket_)(?<!wallet_)address'),
     # 'health' as in health checks, health endpoints and liveness probes is
     # service monitoring, not health data.
-    PIICategory.HEALTH:    r'blood_group|prescription|medication|allerg(?:y|ies)|symptoms?|(?<!/)(?<!service_)(?<!server_)(?<!system_)(?<!app_)health(?!_?(?:check|z|endpoint|status|probe|ping|service|monitor|route|url|api|handler))|medical|diagnosis|disease',
+    PIICategory.HEALTH:    r'blood_group|prescription|medication|allerg(?:y|ies)|symptoms?|(?<!/)(?<!service_)(?<!server_)(?<!system_)(?<!app_)health(?![_\s.]?(?:check|z|endpoint|status|probe|ping|service|monitor|route|url|api|handler|fail(?:ed|ure)?|ok|up|down|error|success|passed|response|result))|medical|diagnosis|disease',
     PIICategory.FINANCIAL: r'bank_account|account_number|account_no|ifsc|credit_card|debit_card|card_number|cvv|upi_id|vpa|iban|salary',
     # A person's name: explicit name fields, and .name read from an object
     # that is a person (user.name, student.name), not file.name / app.name.
@@ -131,6 +132,38 @@ def _blank_string_literals(code: str) -> str:
     return _STR_LIT_RE.sub(repl, code)
 
 
+# An embedded binary payload: a `data:…;base64,` URI, or any unbroken run of
+# base64 characters this long (an inlined image or font). Ordinary
+# identifiers, paths and URLs contain `_`, `-`, `.` or `:` well before then.
+_ENCODED_BLOB_RE = re.compile(r'data:[\w.+/-]*;base64,[A-Za-z0-9+/=]*|[A-Za-z0-9+/=]{120,}')
+
+
+def _blank_encoded_blobs(text: str) -> str:
+    """Encoded payloads carry no identifiers, but their random letters
+    spell PII words after camel-case splitting ('…IBAN…' → 'iban')."""
+    return _ENCODED_BLOB_RE.sub(' ', text) if len(text) >= 120 else text
+
+
+# Words that make "health" a service-status term rather than medical data
+# when they are part of the same identifier: checkHealth, health_endpoint,
+# checkDatabaseHealth, portal_health_api.
+_SERVICE_HEALTH_WORDS = {"check", "checks", "checker", "probe", "ping", "status", "monitor",
+                         "endpoint", "route", "handler", "api", "server", "service",
+                         "unavailable", "liveness", "readiness", "uptime"}
+
+
+def _is_service_health(text: str, start: int, end: int) -> bool:
+    """Whether the `health` at text[start:end] sits in an identifier that
+    also carries a service-status word (split on `_` and `.`)."""
+    a, b = start, end
+    while a > 0 and (text[a - 1].isalnum() or text[a - 1] in "_."):
+        a -= 1
+    while b < len(text) and (text[b].isalnum() or text[b] in "_."):
+        b += 1
+    words = set(re.split(r"[_.]+", text[a:b]))
+    return bool(words & _SERVICE_HEALTH_WORDS)
+
+
 def _pass1_categories(norm_line: str) -> list[PIICategory]:
     """
     All PII categories on a (normalised) line. Overlapping matches are
@@ -140,6 +173,8 @@ def _pass1_categories(norm_line: str) -> list[PIICategory]:
     hits = []
     for cat, rx in _PII_RX.items():
         for m in rx.finditer(norm_line):
+            if cat is PIICategory.HEALTH and m.group(0) == "health" and _is_service_health(norm_line, m.start(), m.end()):
+                continue
             hits.append((m.end() - m.start(), m.start(), m.end(), cat))
     hits.sort(key=lambda h: (-h[0], h[1]))
     taken: list[tuple[int, int]] = []
@@ -527,10 +562,17 @@ _ASSIGN_LHS_RE = re.compile(
 )
 
 
+@functools.lru_cache(maxsize=65536)
+def _own_pii_cached(name: str) -> frozenset:
+    return frozenset(_pass1_categories(_normalise_identifiers(name)))
+
+
 def _own_pii(name: str) -> set[PIICategory]:
     """PII categories an identifier / field / key name itself denotes
-    (`email`, `phoneNumber`, `latest_diagnosis` …)."""
-    return set(_pass1_categories(_normalise_identifiers(name)))
+    (`email`, `phoneNumber`, `latest_diagnosis` …). Names repeat heavily
+    within a file, so the answer is cached; a fresh set is returned because
+    callers merge into it."""
+    return set(_own_pii_cached(name))
 
 
 def _seed_taint(
@@ -826,21 +868,30 @@ class _TaintStore:
         self.ranges = sorted(ranges, key=lambda r: (r[1] - r[0]))   # innermost first
         self.local: dict[tuple, set[PIICategory]] = {}
         self.paths: dict[str, set[PIICategory]] = {}
+        # Scope lookups are asked per line, and a minified bundle puts
+        # thousands of functions and thousands of lookups on a few huge
+        # lines; the ranges never change, so each line is resolved once.
+        self._chains: dict[int, list] = {}
+        self._rank: dict[int, dict] = {}
+        self._by_name: dict[str, dict] = {}     # name -> {scope: categories}
 
     def scope(self, line: int):
-        for r in self.ranges:
-            if r[0] <= line <= r[1]:
-                return r
-        return None
+        return self.chain(line)[0]
 
     def chain(self, line: int) -> list:
-        return [r for r in self.ranges if r[0] <= line <= r[1]] + [None]
+        c = self._chains.get(line)
+        if c is None:
+            c = [r for r in self.ranges if r[0] <= line <= r[1]] + [None]
+            self._chains[line] = c
+        return c
 
     def add(self, name: str, line: int, cats: set[PIICategory]) -> bool:
         name = name.lower()
         if not cats or name in _RECEIVER_NAMES:
             return False
-        cur = self.local.setdefault((self.scope(line), name), set())
+        sc = self.scope(line)
+        cur = self.local.setdefault((sc, name), set())
+        self._by_name.setdefault(name, {})[sc] = cur
         if cats <= cur:
             return False
         cur |= cats
@@ -848,10 +899,16 @@ class _TaintStore:
 
     def get(self, name: str, line: int) -> set[PIICategory]:
         name = name.lower()
-        for sc in self.chain(line):
-            if (sc, name) in self.local:
-                return self.local[(sc, name)]
-        return set()
+        defined = self._by_name.get(name)
+        if not defined:
+            return set()
+        rank = self._rank.get(line)
+        if rank is None:
+            rank = {sc: i for i, sc in enumerate(self.chain(line))}
+            self._rank[line] = rank
+        # the innermost scope enclosing `line` that defines the name
+        best = min((rank[sc] for sc in defined if sc in rank), default=None)
+        return defined[self.chain(line)[best]] if best is not None else set()
 
     def add_path(self, path: str, cats: set[PIICategory]) -> bool:
         path = re.sub(r'\s+', '', path).replace('?.', '.').lower()
@@ -864,10 +921,15 @@ class _TaintStore:
         return True
 
     def get_path(self, path: str) -> set[PIICategory]:
+        """Categories of `path` or of any prefix of it (`a.b.c` is covered by
+        a taint on `a.b`). Looks up each prefix instead of scanning every
+        stored path, so the cost does not grow with the number of paths."""
         path = re.sub(r'\s+', '', path).replace('?.', '.').lower()
         out: set[PIICategory] = set()
-        for p, cats in self.paths.items():
-            if path == p or path.startswith(p + '.'):
+        cur = path.split('.')
+        for i in range(1, len(cur) + 1):
+            cats = self.paths.get('.'.join(cur[:i]))
+            if cats:
                 out |= cats
         return out
 
@@ -1046,23 +1108,76 @@ def _js_sdk_aliases(source_text: str) -> dict[str, str]:
     return aliases
 
 
-def _js_parse(source_text: str):
+def _js_language(file_path: str | None):
+    """The tree-sitter grammar for a source file: TypeScript / TSX files use
+    the TypeScript grammars (type annotations, optional parameters and
+    generics are not valid JavaScript and break the JavaScript parse), every
+    other file the JavaScript grammar. Falls back to JavaScript when the
+    TypeScript grammar is not installed."""
+    ext = (file_path or "").lower().rsplit(".", 1)[-1] if file_path and "." in file_path else ""
+    if ext in ("ts", "tsx", "mts", "cts"):
+        try:
+            import tree_sitter_typescript as tsts
+            return tsts.language_tsx() if ext == "tsx" else tsts.language_typescript()
+        except Exception:
+            pass
+    import tree_sitter_javascript as tsjs
+    return tsjs.language()
+
+
+def _js_parse(source_text: str, file_path: str | None = None):
     try:
         from tree_sitter import Language, Parser
-        import tree_sitter_javascript as tsjs
+        lang = _js_language(file_path)
     except ImportError:
         return None
     try:
-        parser = Parser(Language(tsjs.language()))
+        parser = Parser(Language(lang))
         return parser.parse(bytes(source_text, "utf-8"))
     except Exception:
         return None
 
 
+def _js_callee_text(func, src: bytes) -> str:
+    """The callee of a call as a dotted path, without the arguments of any
+    call earlier in a chain: for `a.b(x => log(x)).c`, the callee is
+    `a.b().c`. Matching the raw text would find a sink named inside an
+    earlier link's callback (`console.log` in a `.then(...)` handler) and
+    attribute it to the whole chain."""
+    def txt(n) -> str:
+        return src[n.start_byte:n.end_byte].decode("utf-8", "ignore")
+    if func.type == "call_expression":
+        inner = func.child_by_field_name("function")
+        return (_js_callee_text(inner, src) + "()") if inner is not None else ""
+    if func.type == "member_expression":
+        obj, prop = func.child_by_field_name("object"), func.child_by_field_name("property")
+        if obj is not None and prop is not None:
+            return _js_callee_text(obj, src) + "." + txt(prop)
+    if func.type in ("parenthesized_expression", "await_expression", "non_null_expression",
+                     "as_expression") and func.named_child_count:
+        return _js_callee_text(func.named_children[0], src)
+    t = txt(func)
+    return t if len(t) <= 200 and "\n" not in t else ""
+
+
+def _js_call_usable(node, func) -> bool:
+    """Whether a call_expression node can be trusted. Where the parser had
+    to recover from a syntax error (a TypeScript file parsed as JavaScript,
+    a template it could not read) it can produce a "call" whose callee is a
+    whole block of unrelated code, which would be matched against the sink
+    list as text and spread over every line of the block."""
+    return not (node.has_error or func.type == "ERROR" or func.has_error)
+
+
 def _ts_walk(node):
-    yield node
-    for child in node.children:
-        yield from _ts_walk(child)
+    """Every node of the tree, parents before children, in source order.
+    Iterative: a recursive generator pays for the whole depth on every node,
+    which on a deeply nested (minified) file dominates the scan."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        stack.extend(reversed(n.children))
 
 
 _JS_STR_CONST_RE = re.compile(
@@ -1115,10 +1230,10 @@ def _js_call_label(func_text: str, aliases: dict[str, str], url: str | None = No
     return _http_recipient(label, url)
 
 
-def _js_call_sinks(source_text: str) -> dict[int, str] | None:
+def _js_call_sinks(source_text: str, file_path: str | None = None) -> dict[int, str] | None:
     """JS/TS counterpart of _python_call_sinks (tree-sitter). Returns None
     when tree-sitter is unavailable (caller falls back to text matching)."""
-    tree = _js_parse(source_text)
+    tree = _js_parse(source_text, file_path)
     if tree is None:
         return None
     src = bytes(source_text, "utf-8")
@@ -1129,9 +1244,9 @@ def _js_call_sinks(source_text: str) -> dict[int, str] | None:
         if node.type != "call_expression":
             continue
         func = node.child_by_field_name("function")
-        if func is None:
+        if func is None or not _js_call_usable(node, func):
             continue
-        label = _js_call_label(src[func.start_byte:func.end_byte].decode("utf-8", "ignore"), aliases,
+        label = _js_call_label(_js_callee_text(func, src), aliases,
                                _js_url_of(node.child_by_field_name("arguments"), src, consts))
         if not label:
             continue
@@ -1143,6 +1258,13 @@ def _js_call_sinks(source_text: str) -> dict[int, str] | None:
 _JS_FUNCTION_NODES = ("function_declaration", "function", "function_expression", "arrow_function",
                       "method_definition", "generator_function_declaration")
 _JS_PATH_RE = re.compile(r'[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*')
+
+
+# Longest expression (an assigned value or a call's arguments) whose text is
+# searched for personal data. Ordinary expressions are far shorter; a longer
+# one is a minified bundle or embedded data, where one expression holds
+# thousands of nested ones that would each be searched again.
+MAX_TAINT_EXPR_CHARS = 5000
 
 
 def _js_taint_analysis(
@@ -1167,7 +1289,7 @@ def _js_taint_analysis(
     if not line_findings:
         return taint_findings
 
-    tree = _js_parse(source_text)
+    tree = _js_parse(source_text, file_path)
     if tree is None:
         return taint_findings
 
@@ -1183,6 +1305,8 @@ def _js_taint_analysis(
         return src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
 
     def _text_cats(text: str, line: int) -> set[PIICategory]:
+        if len(text) > MAX_TAINT_EXPR_CHARS:
+            return set()
         # blank string contents so words inside literals don't count
         for s_, e_ in reversed(_string_spans(text, 'js')):
             text = text[:s_] + ' ' * (e_ - s_) + text[e_:]
@@ -1198,11 +1322,11 @@ def _js_taint_analysis(
                 out |= store.get_path(expr)
         return out
 
+    all_nodes = list(_ts_walk(tree.root_node))
+    assignments = [n for n in all_nodes if n.type in ("variable_declarator", "assignment_expression")]
     for _ in range(5):
         changed = False
-        for node in _ts_walk(tree.root_node):
-            if node.type not in ("variable_declarator", "assignment_expression"):
-                continue
+        for node in assignments:
             lhs = node.child_by_field_name("name") or node.child_by_field_name("left")
             rhs = node.child_by_field_name("value") or node.child_by_field_name("right")
             if lhs is None or rhs is None:
@@ -1219,14 +1343,14 @@ def _js_taint_analysis(
         if not changed:
             break
 
-    for node in _ts_walk(tree.root_node):
+    for node in all_nodes:
         if node.type != "call_expression":
             continue
         func = node.child_by_field_name("function")
         args = node.child_by_field_name("arguments")
-        if func is None or args is None:
+        if func is None or args is None or not _js_call_usable(node, func):
             continue
-        sink = _js_call_label(_node_text(func), aliases, _js_url_of(args, src_bytes, consts))
+        sink = _js_call_label(_js_callee_text(func, src_bytes), aliases, _js_url_of(args, src_bytes, consts))
         if not sink:
             continue
         line_no = node.start_point[0] + 1
@@ -1250,7 +1374,8 @@ def _finding_modules(file_module_types: set[str], sink: str | None) -> set[str]:
     return set(file_module_types) | ({extra} if extra else set())
 
 
-def _function_ranges(source_text: str, is_py: bool, is_js: bool) -> list[tuple[int, int]]:
+def _function_ranges(source_text: str, is_py: bool, is_js: bool,
+                     file_path: str | None = None) -> list[tuple[int, int]]:
     """(first, last) line of every function / method in the file."""
     out: list[tuple[int, int]] = []
     if is_py:
@@ -1262,7 +1387,7 @@ def _function_ranges(source_text: str, is_py: bool, is_js: bool) -> list[tuple[i
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 out.append((n.lineno, n.end_lineno or n.lineno))
     elif is_js:
-        tree = _js_parse(source_text)
+        tree = _js_parse(source_text, file_path)
         if tree is None:
             return out
         for n in _ts_walk(tree.root_node):
@@ -1272,7 +1397,8 @@ def _function_ranges(source_text: str, is_py: bool, is_js: bool) -> list[tuple[i
     return out
 
 
-def _document_sdk_inferences(source_text, lines, call_sinks, findings, is_py, is_js) -> list[dict]:
+def _document_sdk_inferences(source_text, lines, call_sinks, findings, is_py, is_js,
+                             file_path=None) -> list[dict]:
     """
     A document-analysis (OCR) service receives an identity document as an
     image or file, so the personal data on it never appears as a named
@@ -1295,7 +1421,7 @@ def _document_sdk_inferences(source_text, lines, call_sinks, findings, is_py, is
                 calls.setdefault(i, label)
     if not calls:
         return []
-    ranges = _function_ranges(source_text, is_py, is_js)
+    ranges = _function_ranges(source_text, is_py, is_js, file_path)
     out: list[dict] = []
     for call, label in sorted(calls.items()):
         enclosing = [r for r in ranges if r[0] <= call <= r[1]]
@@ -1308,6 +1434,21 @@ def _document_sdk_inferences(source_text, lines, call_sinks, findings, is_py, is
         for cat in sorted(cats, key=lambda c: c.value):
             out.append({"line": call, "cat": cat, "sink": label})
     return out
+
+
+# A source file whose lines are this long is minified or concatenated build
+# output (a bundled plugin set, an inlined library), not code someone wrote
+# and maintains, whatever its file name says.
+MINIFIED_MAX_LINE = 5000
+MINIFIED_AVG_LINE = 500
+
+
+def _looks_minified(source_text: str) -> bool:
+    if len(source_text) < 2000:
+        return False
+    lines = source_text.splitlines() or [source_text]
+    return (max(len(l) for l in lines) >= MINIFIED_MAX_LINE
+            or len(source_text) / len(lines) >= MINIFIED_AVG_LINE)
 
 
 def _scan_single_file(
@@ -1348,7 +1489,7 @@ def _scan_single_file(
         # tree-sitter for JS/TS), so multi-line calls and SDK aliases work.
         # None when the file can't be parsed → fall back to text matching.
         _call_sinks = (_python_call_sinks(source_text) if is_py
-                       else _js_call_sinks(source_text) if is_js else None)
+                       else _js_call_sinks(source_text, file_obj.path) if is_js else None)
         # JS/TS block comments  /* ... */  and  /** ... */
         _in_block_comment = False
 
@@ -1424,7 +1565,7 @@ def _scan_single_file(
             # data; only identifiers and interpolated expressions count.
             _p1_text = (_blank_string_literals(code_part)
                         if line_sink and sink_kind(line_sink) == 'logger' else code_part)
-            categories = _pass1_categories(_normalise_identifiers(_p1_text))
+            categories = _pass1_categories(_normalise_identifiers(_blank_encoded_blobs(_p1_text)))
             if PIICategory.AADHAAR in categories and not _validate_aadhaar(code_part):
                 categories.remove(PIICategory.AADHAAR)   # Verhoeff fails — skip
 
@@ -1513,7 +1654,7 @@ def _scan_single_file(
 
         # ── Document-analysis services (OCR) ─────────────────────────
         for inf in _document_sdk_inferences(source_text, lines, _call_sinks, file_findings,
-                                            is_py, is_js):
+                                            is_py, is_js, file_obj.path):
             file_findings.append(DataFlowObject(
                 source="scope_inference",
                 file_path=file_obj.path,
@@ -1526,6 +1667,10 @@ def _scan_single_file(
                 module_types=sorted(_finding_modules(file_module_types, inf["sink"])),
                 call_line=inf["line"],
             ))
+
+        if _looks_minified(source_text):
+            for f in file_findings:
+                f.origin = "generated"
 
     except Exception as e:
         if raise_errors:      # scan_github_repo counts it in coverage["failed"]
@@ -1582,6 +1727,11 @@ def scan_files(reader, paths: list[str]) -> tuple[list, dict, dict]:
         origin = classify_path(path)
         if origin == "other":           # a path given directly (tests, scripts)
             origin = "first_party"
+        # a first-party path whose content is minified build output is generated
+        content_generated = (origin == "first_party" and bool(file_findings)
+                             and all(f.origin == "generated" for f in file_findings))
+        if content_generated:
+            origin = "generated"
         for f in file_findings:
             f.origin = origin
         findings.extend(file_findings)

@@ -519,7 +519,11 @@ def _expand_duplicates(findings: list, scanned: set, failed: dict, duplicates: d
         scanned.add(copy)
         origin = classify_path(copy)
         for f in by_path.get(original, []):
-            extra.append(f.model_copy(update={"file_path": copy, "origin": origin}))
+            # a copy is as generated as its original, even when only the
+            # original's content (not the copy's path) shows it
+            extra.append(f.model_copy(update={
+                "file_path": copy,
+                "origin": "generated" if f.origin == "generated" and origin == "first_party" else origin}))
     return findings + extra
 
 
