@@ -28,3 +28,4 @@ en_core_web_lg @ https://github.com/explosion/spacy-models/releases/download/en_
 
 # Tests (pytest -q tests)
 pytest>=8.0
+cryptography>=42.0

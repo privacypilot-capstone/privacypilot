@@ -568,12 +568,21 @@ class _Resp:
         self.status_code, self.text, self.headers = status, text, headers or {}
 
 
+def _offline_fetch(monkeypatch, fake_get):
+    """Policy-fetch tests run offline: names resolve to a public address, and
+    the pinned GET is routed to the fake `requests.get`."""
+    import socket
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    monkeypatch.setattr(pp, "_pinned_get", lambda url, ip, headers: fake_get(url, headers=headers, timeout=15, allow_redirects=False))
+    monkeypatch.setattr(pp.requests, "get", fake_get)
+
+
 def test_A8_redirect_to_internal_address_is_refused(monkeypatch):
     calls = []
     def fake_get(url, **kw):
         calls.append(kw)
         return _Resp(302, headers={"Location": "http://127.0.0.1/admin"})
-    monkeypatch.setattr(pp.requests, "get", fake_get)
+    _offline_fetch(monkeypatch, fake_get)
     with pytest.raises(ValueError):
         pp.fetch_policy_text("https://example.com/policy")
     assert len(calls) == 1 and calls[0].get("allow_redirects") is False
@@ -586,7 +595,7 @@ def test_A8_token_not_forwarded_off_github_on_redirect(monkeypatch):
         if len(seen) == 1:
             return _Resp(302, headers={"Location": "https://8.8.8.8/policy.txt"})
         return _Resp(200, "We collect your email address.", {"Content-Type": "text/plain"})
-    monkeypatch.setattr(pp.requests, "get", fake_get)
+    _offline_fetch(monkeypatch, fake_get)
     pp.fetch_policy_text("https://raw.githubusercontent.com/a/b/main/P.md", github_token="T")
     assert "Authorization" in seen[0][1]
     assert "Authorization" not in seen[1][1]
@@ -595,7 +604,7 @@ def test_A8_token_not_forwarded_off_github_on_redirect(monkeypatch):
 # ── A9: short plain-text policies (raw GitHub URLs) are accepted ──────────────
 
 def test_A9_short_plain_text_policy_is_accepted(monkeypatch):
-    monkeypatch.setattr(pp.requests, "get", lambda url, **kw: _Resp(
+    _offline_fetch(monkeypatch, lambda url, **kw: _Resp(
         200, "We collect your email address to create your account.",
         {"Content-Type": "text/plain; charset=utf-8"}))
     text, _ = pp.fetch_policy_text("https://raw.githubusercontent.com/a/b/main/P.md")
@@ -603,7 +612,7 @@ def test_A9_short_plain_text_policy_is_accepted(monkeypatch):
 
 
 def test_A9_short_html_page_is_still_rejected(monkeypatch):
-    monkeypatch.setattr(pp.requests, "get", lambda url, **kw: _Resp(
+    _offline_fetch(monkeypatch, lambda url, **kw: _Resp(
         200, "<html><body>Page not found</body></html>", {"Content-Type": "text/html"}))
     with pytest.raises(ValueError):
         pp.fetch_policy_text("https://example.com/privacy")
@@ -752,7 +761,7 @@ def test_B7_sdk_disclosed_only_for_the_bullet_that_names_it():
 def test_B7_html_block_tags_separate_units(monkeypatch):
     html = ("<h2>Data We Collect</h2><p>We collect your name and email address.</p>"
             "<h2>Third Parties</h2><p>We use Twilio to send SMS to your phone number.</p>")
-    monkeypatch.setattr(pp.requests, "get", lambda url, **kw: _Resp(200, html, {"Content-Type": "text/html"}))
+    _offline_fetch(monkeypatch, lambda url, **kw: _Resp(200, html, {"Content-Type": "text/html"}))
     _, raw = pp.fetch_policy_text("https://github.com/o/r/blob/main/p.html")
     units = pp._policy_units(raw)
     assert "We collect your name and email address" in units
@@ -2187,3 +2196,119 @@ def test_minified_content_is_generated_even_with_ordinary_name():
     ordinary = "const email = user.email;\nconsole.log(email);\n"
     assert cs._looks_minified(body) and not cs._looks_minified(ordinary)
     assert not cs._own_pii("healthResponse") and cs.PIICategory.HEALTH in cs._own_pii("health_data")
+
+
+# ── H: hardening of PrivacyPilot's own handling of secrets (report Table 22) ──
+
+_GH = "ghp_" + "a" * 36
+
+
+@pytest.fixture
+def _vault(monkeypatch, tmp_path):
+    import security
+    monkeypatch.delenv("PRIVACYPILOT_TOKEN_KEY", raising=False)
+    monkeypatch.setattr(security, "_KEY_FILE", tmp_path / ".token_key")
+    monkeypatch.setattr(security, "_fernet", None)
+    return security
+
+
+def test_H1_token_is_encrypted_in_the_task_message(_vault):
+    sealed = _vault.seal(_GH)
+    assert sealed.startswith("pp1:") and _GH not in sealed
+    assert _vault.unseal(sealed) == _GH
+    assert _vault.unseal(_GH) == _GH            # an unsealed token (older queue, tests) still works
+    assert _vault.seal(None) is None and _vault.unseal("") == ""
+    assert (_vault._KEY_FILE.stat().st_mode & 0o077) == 0 or __import__("os").name == "nt"
+
+
+def test_H1b_sealed_token_expires(_vault, monkeypatch):
+    sealed = _vault.seal(_GH)
+    monkeypatch.setattr(_vault, "TOKEN_TTL_S", -1)
+    with pytest.raises(ValueError, match="expired"):
+        _vault.unseal(sealed)
+
+
+def test_H1c_workers_receive_the_sealed_token_and_use_the_plain_one(_vault, monkeypatch):
+    import tasks
+    seen = {}
+    monkeypatch.setattr(pp, "parse_privacy_policy", lambda url, tok=None: seen.setdefault("tok", tok) and ([], {}, [], {}))
+    tasks.parse_policy_task(" https://example.com/p".strip(), _vault.seal(_GH))
+    assert seen["tok"] == _GH
+
+
+def test_H2_secrets_never_reach_logs_or_error_messages(_vault, caplog):
+    import logging
+    _vault.install_log_redaction()
+    sealed = _vault.seal(_GH)
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("celery").info("Task failed args=[1, '%s', '%s'] Authorization: Bearer %s", sealed, _GH, _GH)
+    # caplog's own handler sits below the logger-level filter, so the record is already redacted
+    assert _GH not in caplog.text and sealed not in caplog.text and "***REDACTED***" in caplog.text
+    assert "AIza" not in _vault.redact_secrets("https://g/v1:generate?key=AIza" + "b" * 35)
+
+
+def test_H3_llm_receives_no_secrets_or_personal_values(monkeypatch):
+    import llm_client
+    sent = {}
+    monkeypatch.setattr(llm_client, "_llm_call", lambda system, messages: sent.update(system=system, messages=messages) or "ok")
+    scan_data = {"violations": [{"severity": "high", "dpdp_section": "Section 8(5)", "section_title": "t",
+                                 "pii_category": "email", "evidence": "logs a.b@corp.in and 9876543210 with " + _GH}]}
+    llm_client.chat_completion([{"role": "user", "content": "is ABCDE1234F exposed? key " + _GH}], scan_data)
+    blob = sent["system"] + str(sent["messages"])
+    for leak in ("a.b@corp.in", "9876543210", "ABCDE1234F", _GH):
+        assert leak not in blob, leak
+    assert "email" in blob                      # the category name is kept: the model needs it
+
+
+def test_H4_policy_fetch_connects_to_the_validated_address(monkeypatch):
+    import socket
+    answers = iter([[(2, 1, 6, "", ("93.184.216.34", 0))], [(2, 1, 6, "", ("127.0.0.1", 0))]])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: next(answers))   # DNS rebinding: public, then loopback
+    got = []
+    monkeypatch.setattr(pp, "_pinned_get", lambda url, ip, hdrs: got.append(ip) or _Resp(200, "ok"))
+    pp._get_with_safe_redirects("https://rebind.example.com/privacy", {})
+    assert got == ["93.184.216.34"]             # the second, loopback answer is never used
+
+
+def test_H4b_pinned_get_sends_the_original_host_header():
+    import http.server, threading
+    seen = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["host"] = self.headers["Host"]; self.send_response(200); self.end_headers(); self.wfile.write(b"policy")
+        def log_message(self, *a): pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        r = pp._pinned_get(f"http://policy.example.test:{port}/privacy", "127.0.0.1", {})
+        assert r.text == "policy" and seen["host"] == f"policy.example.test:{port}"
+    finally:
+        srv.shutdown()
+
+
+def test_H5_ablation_switches_turn_components_off(monkeypatch):
+    from scanners import code_scanner as cs
+    saved = (cs._verhoeff_validate, cs._python_taint_analysis, cs._js_taint_analysis)
+    try:
+        assert cs._apply_ablation(set()) == set() and cs._verhoeff_validate is saved[0]
+        cs._apply_ablation({"verhoeff", "taint"})
+        assert cs._verhoeff_validate("123456789012") is True          # no check digit needed
+        assert cs._python_taint_analysis("x = 1", "a.py", {}) == [] and cs._js_taint_analysis("x", "a.js", {}) == []
+    finally:
+        cs._verhoeff_validate, cs._python_taint_analysis, cs._js_taint_analysis = saved
+
+
+def test_H6_scan_records_and_exposes_the_vagueness_setting(monkeypatch):
+    import json, main
+    from scanners.policy_parser import vagueness_scope
+    monkeypatch.setenv("PRIVACYPILOT_VAGUENESS_SCOPE", "notice")
+    assert vagueness_scope() == "notice"
+    monkeypatch.delenv("PRIVACYPILOT_VAGUENESS_SCOPE")
+    assert vagueness_scope() == "statement"
+    class S: coverage = json.dumps({"scanned": 1, "total_source_files": 1, "vagueness_scope": "statement"})
+    assert main._coverage_summary(S)["vagueness_scope"] == "statement"
+    class Old: coverage = json.dumps({"scanned": 1, "total_source_files": 1})
+    assert main._coverage_summary(Old)["vagueness_scope"] is None

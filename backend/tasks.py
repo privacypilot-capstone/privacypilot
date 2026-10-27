@@ -12,6 +12,10 @@ from celery import Celery, chord, group, signals
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.worker.control import inspect_command
 
+from security import unseal, redact_secrets, install_log_redaction
+
+install_log_redaction()   # tokens and API keys never reach a log line
+
 # ── Celery application ────────────────────────────────────────────────────────
 # Both broker and result backend point at the Redis container (or localhost in
 # local dev).  REDIS_URL can be overridden in .env or docker-compose environment.
@@ -206,7 +210,8 @@ def _require_scan(scan_id: int) -> None:
 
 
 def _fail_scan(scan_id: int, message) -> None:
-    _update_scan(scan_id, status="failed", phase="failed", error_message=str(message)[:2000])
+    message = redact_secrets(message)
+    _update_scan(scan_id, status="failed", phase="failed", error_message=message[:2000])
     print(f"[task] Scan {scan_id} FAILED: {message}")
 
 
@@ -244,8 +249,9 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
     protected by per-read network timeouts (a stalled connection fails and is
     retried rather than hanging), and which records a heartbeat as it goes.
 
-    Security: the GitHub token travels only in Redis task messages; it is
-    never written to the database.
+    Security: the GitHub token travels only in Redis task messages, encrypted
+    (security.seal) and expiring; it is never written to the database. `token`
+    below is the sealed form that is handed on to the other tasks.
     """
     from scanners import repo_snapshot as rs
 
@@ -259,9 +265,10 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
         print(f"[task] Scan {scan_id} running — repo: {repo_url}")
         rs.prune_old_snapshots()
 
-        ref = rs.resolve_repo(repo_url, token)
+        plain = unseal(token)
+        ref = rs.resolve_repo(repo_url, plain)
         manifest = rs.ensure_snapshot(
-            ref, token, on_progress=lambda _bytes: _update_scan(scan_id))
+            ref, plain, on_progress=lambda _bytes: _update_scan(scan_id))
         to_scan, duplicates = rs.plan_unique(manifest["files"])
         chunks = rs.make_chunks(to_scan)
         origins = manifest.get("origins") or rs.origin_counts(manifest["files"])
@@ -322,7 +329,7 @@ def scan_chunk_task(self, scan_id: int, chunk_no: int, round_no: int,
     from scanners import repo_snapshot as rs
 
     try:
-        result = run_chunk(rs.SnapshotReader(rs.RepoRef(full_name, sha), token), paths)
+        result = run_chunk(rs.SnapshotReader(rs.RepoRef(full_name, sha), unseal(token)), paths)
     except rs.RateLimited as e:
         raise self.retry(countdown=e.retry_after, exc=e)
     if result["unfinished"]:
@@ -414,7 +421,7 @@ def parse_policy_task(policy_url: str, token: str):
     can report them on the scan."""
     from scanners.policy_parser import parse_privacy_policy
     try:
-        claims, purpose_map, vagueness, disclosed = parse_privacy_policy(policy_url, token)
+        claims, purpose_map, vagueness, disclosed = parse_privacy_policy(policy_url, unseal(token))
     except Exception as e:
         return {"policy_error": f"Privacy policy could not be processed: {e}"}
     return {"policy": {
@@ -531,6 +538,7 @@ def complete_scan(scan_id: int, policy: dict) -> dict:
     """Merge every stored chunk, run the rule engine, score and persist."""
     from database import Scan, ScanChunk, Finding, Violation
     from scanners.code_scanner import coverage_note
+    from scanners.policy_parser import vagueness_scope
     from dpdp.rule_engine import run_dpdp_rules
     from scoring import calculate_compliance_score
 
@@ -608,6 +616,9 @@ def complete_scan(scan_id: int, policy: dict) -> dict:
             "origins": prior.get("origins", {}),
             "duplicates_reused": len(duplicates),
             "findings_by_origin": by_origin,
+            # Which reading of Rule 3(b)(ii) produced the vague-purpose results
+            # (shown on the results page and in the report).
+            "vagueness_scope": vagueness_scope(),
         }
 
         scan.findings_count   = len(code_findings)

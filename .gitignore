@@ -45,3 +45,6 @@ eval/repos.json
 docker-compose.override.yml
 docker-compose.local.yml
 frontend/.env.local
+
+# Per-install key for the GitHub token in task messages (backend/security.py)
+backend/.token_key

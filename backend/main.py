@@ -21,6 +21,9 @@ from scoring import calculate_compliance_score
 from report_generator import generate_report_html
 from models.dataflow import PIICategory
 from llm_client import generate_report_summary, chat_completion, LLMNotConfiguredError
+from security import seal, redact_secrets, install_log_redaction
+
+install_log_redaction()   # tokens and API keys never reach a log line
 
 app = FastAPI(title="PrivacyPilot API", version="0.1.0")
 
@@ -109,7 +112,7 @@ def _check_task_failure(scan, db) -> None:
         return
     scan.status = "failed"
     scan.phase = "failed"
-    scan.error_message = f"The scan worker failed: {res.result}"[:2000]
+    scan.error_message = redact_secrets(f"The scan worker failed: {res.result}")[:2000]
     db.commit()
 
 
@@ -140,6 +143,7 @@ def _coverage_summary(scan) -> dict | None:
         "origins":            c.get("origins", {}),
         "duplicates_reused":  c.get("duplicates_reused", 0),
         "findings_by_origin": c.get("findings_by_origin", {}),
+        "vagueness_scope":    c.get("vagueness_scope"),     # None for scans made before this was recorded
     }
 
 
@@ -336,7 +340,7 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
     Poll GET /scans/{scan_id}/status for DB-level progress
     or  GET /scan/status/{task_id} for Celery-level state.
 
-    Security: the GitHub token is never written to the database; it travels
+    Security: the GitHub token is never written to the database; it travels (encrypted)
     only in the transient Redis task payload.
     """
     # Security: never log the GitHub token
@@ -381,7 +385,7 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
         task = run_scan_task.delay(
             scan_id,
             req.github_repo_url,
-            req.github_token,
+            seal(req.github_token),   # encrypted in the task message (security.py)
             req.privacy_policy_url,
         )
     except ImportError as e:
@@ -400,7 +404,7 @@ async def run_scan(req: ScanRequest, db: Session = Depends(get_db)):
         where = REDIS_URL.split("@")[-1]       # never show a Redis password
         scan.status = "failed"
         scan.phase = "failed"
-        scan.error_message = f"Could not queue the scan: Redis at {where} is not reachable ({e})."
+        scan.error_message = redact_secrets(f"Could not queue the scan: Redis at {where} is not reachable ({e}).")
         db.commit()
         raise HTTPException(status_code=503, detail=scan.error_message)
 

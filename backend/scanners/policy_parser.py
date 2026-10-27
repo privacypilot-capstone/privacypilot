@@ -17,6 +17,7 @@ import os
 import re
 import socket
 import requests
+import requests.adapters
 from urllib.parse import urljoin, urlparse
 from models.dataflow import DataFlowObject, PIICategory, Sensitivity
 from scanners.sinks import sdks_named_in
@@ -52,16 +53,17 @@ def _ip_is_blocked(ip: str) -> bool:
     return (not addr.is_global) or addr.is_multicast
 
 
-def validate_policy_url(url: str) -> None:
+def validate_policy_url(url: str) -> list[str]:
     """
     SSRF protection: blocks loopback, private, link-local, CGNAT, cloud
     metadata and other non-public addresses, IPv4 and IPv6. Every address
     the host resolves to is checked, not just the first.
     Raises ValueError with descriptive message on any failure.
 
-    fetch_policy_text() calls this again for every redirect hop. Residual
-    risk: DNS could still change between this check and the connection
-    (DNS rebinding); closing that fully needs connecting to the checked IP.
+    Returns the checked addresses. _get_with_safe_redirects() connects to one
+    of exactly these, so the name is not resolved again between the check and
+    the connection (no DNS rebinding window), and it calls this again for
+    every redirect hop.
     """
     try:
         parsed = urlparse(url)
@@ -91,6 +93,7 @@ def validate_policy_url(url: str) -> None:
             f"Domain '{domain}' could not be resolved. "
             "Please check the URL is correct and publicly accessible."
         )
+    ips: list[str] = []
     for info in infos:
         ip = info[4][0]
         if _ip_is_blocked(ip):
@@ -98,7 +101,10 @@ def validate_policy_url(url: str) -> None:
                 f"URL resolves to a private or internal IP address ({ip}). "
                 "Internal network URLs are blocked for security."
             )
+        if ip not in ips:
+            ips.append(ip)
     print(f"[security] URL validated: {url[:80]}")
+    return ips
 
 
 # ── PII detection config ──────────────────────────────────────────────────────
@@ -804,6 +810,34 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
 
 
+class _PinnedAdapter(requests.adapters.HTTPAdapter):
+    """Connects to a given address while TLS still verifies the real host name."""
+
+    def __init__(self, hostname: str):
+        self._hostname = hostname
+        super().__init__()
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kw):
+        kw["server_hostname"] = self._hostname      # SNI
+        kw["assert_hostname"] = self._hostname      # certificate check
+        super().init_poolmanager(connections, maxsize, block=block, **kw)
+
+
+def _pinned_get(url: str, ip: str, headers: dict):
+    """GET `url` by connecting to `ip` (already validated), with Host / SNI /
+    certificate checks for the original host name."""
+    p = urlparse(url)
+    host = p.hostname
+    port = f":{p.port}" if p.port else ""
+    ip_host = f"[{ip}]" if ":" in ip else ip
+    target = p._replace(netloc=f"{ip_host}{port}").geturl()
+    hdrs = dict(headers)
+    hdrs["Host"] = f"{host}{port}"
+    with requests.Session() as sess:
+        sess.mount("https://", _PinnedAdapter(host))
+        return sess.get(target, headers=hdrs, timeout=15, allow_redirects=False)
+
+
 def _get_with_safe_redirects(url: str, headers: dict):
     """
     GET with redirects followed MANUALLY: every hop's target is passed back
@@ -815,7 +849,11 @@ def _get_with_safe_redirects(url: str, headers: dict):
     """
     headers = dict(headers)
     for _ in range(_MAX_REDIRECTS + 1):
-        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=False)
+        ips = validate_policy_url(url)
+        if ips:
+            resp = _pinned_get(url, ips[0], headers)
+        else:   # validator replaced (tests): nothing to pin to
+            resp = requests.get(url, headers=headers, timeout=15, allow_redirects=False)
         location = resp.headers.get("Location") if resp.status_code in _REDIRECT_CODES else None
         if not location:
             return resp
@@ -1495,3 +1533,9 @@ def parse_privacy_policy(
     )
 
     return findings, purpose_map, vagueness_warnings, disclosed_sdks
+
+
+# Ablation switch (evaluation only): PRIVACYPILOT_DISABLE=ner makes the policy
+# parser use its keyword path instead of spaCy named-entity recognition.
+if "ner" in {x.strip().lower() for x in os.getenv("PRIVACYPILOT_DISABLE", "").split(",")}:
+    _get_nlp = lambda: None

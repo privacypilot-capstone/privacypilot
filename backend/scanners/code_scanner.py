@@ -36,6 +36,7 @@ cap and no whole-scan deadline here.
 """
 
 import ast
+import os
 import functools
 import re
 
@@ -1782,3 +1783,23 @@ def scan_github_repo(repo_url: str, github_token: str | None):
     print(f"[scanner] Done — {len(findings)} PII findings; "
           f"{coverage['scanned']}/{coverage['total_source_files']} files")
     return findings, usage_map, coverage
+
+
+# ── Ablation switches (evaluation only) ───────────────────────────────────────
+# PRIVACYPILOT_DISABLE=taint,verhoeff,ner turns a component off so its
+# contribution can be measured (report, Section 4.7). Never set in normal use.
+def _apply_ablation(disabled=None) -> set:
+    global _verhoeff_validate, _python_taint_analysis, _js_taint_analysis
+    if disabled is None:
+        disabled = {x.strip().lower() for x in os.getenv("PRIVACYPILOT_DISABLE", "").split(",") if x.strip()}
+    if "verhoeff" in disabled:
+        _verhoeff_validate = lambda candidate: True          # every 12-digit number counts as Aadhaar
+    if "taint" in disabled:
+        _python_taint_analysis = lambda *a, **k: []
+        _js_taint_analysis = lambda *a, **k: []
+    if disabled:
+        print(f"[ablation] components disabled: {sorted(disabled)}")
+    return disabled
+
+
+_apply_ablation()

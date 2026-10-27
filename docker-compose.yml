@@ -9,6 +9,9 @@ services:
     environment:
       - DATABASE_URL=postgresql://pilot:pilot@db:5432/privacypilot
       - REDIS_URL=redis://redis:6379/0
+      # Key for the GitHub token in task messages (backend/security.py). Optional:
+      # unset, a random key is created in backend/.token_key and shared by both services.
+      - PRIVACYPILOT_TOKEN_KEY=${PRIVACYPILOT_TOKEN_KEY:-}
     depends_on:
       db:
         condition: service_healthy
@@ -55,6 +58,9 @@ services:
     environment:
       - DATABASE_URL=postgresql://pilot:pilot@db:5432/privacypilot
       - REDIS_URL=redis://redis:6379/0
+      # Key for the GitHub token in task messages (backend/security.py). Optional:
+      # unset, a random key is created in backend/.token_key and shared by both services.
+      - PRIVACYPILOT_TOKEN_KEY=${PRIVACYPILOT_TOKEN_KEY:-}
       - PYTHONPATH=/app
       # Repository snapshots: downloaded once per commit, read by every
       # chunk task. Must be shared by all worker processes (one volume).

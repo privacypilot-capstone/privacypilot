@@ -21,6 +21,8 @@ import os
 import json
 import requests
 
+from security import redact_for_llm, redact_secrets
+
 # ── Provider configuration ────────────────────────────────────────────────────
 
 _GEMINI_KEY     = os.getenv("GEMINI_API_KEY")
@@ -242,9 +244,9 @@ def _llm_call(system: str, messages: list[dict]) -> str:
         try:
             return fn(system, messages)
         except Exception as e:
-            print(f"[llm] {name} provider failed entirely: {e}")
+            print(f"[llm] {name} provider failed entirely: {redact_secrets(e)}")
             last_err = e
-    raise last_err
+    raise RuntimeError(redact_secrets(last_err)) from None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -261,7 +263,7 @@ def generate_report_summary(scan_data: dict) -> str:
     -------
     str  — markdown-formatted executive summary
     """
-    context = _scan_context_text(scan_data)
+    context = redact_for_llm(_scan_context_text(scan_data))
     system  = _SYSTEM_PROMPT + "\n\n" + context
 
     prompt = (
@@ -293,6 +295,7 @@ def chat_completion(messages: list[dict], scan_data: dict) -> str:
     -------
     str  — assistant reply
     """
-    context = _scan_context_text(scan_data)
+    context = redact_for_llm(_scan_context_text(scan_data))
     system  = _SYSTEM_PROMPT + "\n\n" + context
+    messages = [{**m, "content": redact_for_llm(m.get("content", ""))} for m in messages]
     return _llm_call(system, messages)

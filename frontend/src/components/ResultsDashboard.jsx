@@ -356,6 +356,16 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           notice gaps and purpose checks use your own code.
         </div>
       )}
+      {/* ── How vague purposes were judged (Rule 3(b)(ii)) ── */}
+      {result?.coverage?.vagueness_scope && (
+        <div className="card card-pad mb-24" style={{ fontSize: 13 }} data-testid="vagueness-scope">
+          <strong>Vague-purpose setting:</strong>{' '}
+          {result.coverage.vagueness_scope === 'notice'
+            ? 'whole notice. A category is reported as vague only if no statement in the policy gives it a specific purpose.'
+            : 'every statement (default). Each generic purpose statement is reported, even if another statement gives the category a specific purpose.'}
+          {' '}The other setting can be chosen with PRIVACYPILOT_VAGUENESS_SCOPE (README, "Checks").
+        </div>
+      )}
       {/* ── Metric strip ── */}
       <div className="metrics-row mb-24">
         <div className="metric-card">
