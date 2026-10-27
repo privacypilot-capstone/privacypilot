@@ -633,11 +633,12 @@ def _content_words(part: str) -> list[tuple[str, bool]]:
 
 
 def vagueness_scope() -> str:
-    """'notice' (default): a category is vague only when no statement in the
-    policy gives it a specific purpose. 'statement': every generic purpose
-    statement is reported."""
-    v = os.getenv("PRIVACYPILOT_VAGUENESS_SCOPE", "notice").strip().lower()
-    return v if v in ("notice", "statement") else "notice"
+    """'statement' (default): every generic purpose statement is reported.
+    'notice': a category is vague only when no statement in the policy gives
+    it a specific purpose. Set PRIVACYPILOT_VAGUENESS_SCOPE=notice to use the
+    stricter reading; no setting is needed for the default."""
+    v = os.getenv("PRIVACYPILOT_VAGUENESS_SCOPE", "statement").strip().lower()
+    return v if v in ("notice", "statement") else "statement"
 
 
 def purpose_statement_kind(sentence: str) -> str:
@@ -1331,9 +1332,9 @@ def _pass2_extract_purposes(
     # send you OTPs") has one, even if another statement also uses generic
     # wording ("… and to improve our services"). Only a category whose every
     # purpose statement is generic is reported as vague.
-    # PRIVACYPILOT_VAGUENESS_SCOPE=statement restores the per-statement
-    # reading (every generic statement is reported, whatever else the policy
-    # says about the same data).
+    # The default scope is "statement": every generic statement is reported,
+    # whatever else the policy says about the same data.
+    # PRIVACYPILOT_VAGUENESS_SCOPE=notice applies the whole-notice reading.
     if vagueness_scope() == "notice":
         vagueness_warnings = [w for w in vagueness_warnings
                               if not specific_for.get(PIICategory(w["pii_category"]))]

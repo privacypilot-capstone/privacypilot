@@ -2002,6 +2002,7 @@ def test_V1_purpose_statement_specificity(sentence, kind):
 
 
 def test_V2_vagueness_is_judged_for_the_whole_notice(monkeypatch):
+    monkeypatch.setenv("PRIVACYPILOT_VAGUENESS_SCOPE", "notice")
     monkeypatch.setattr(pp, "_get_nlp", lambda: None)
     monkeypatch.setattr(pp, "_get_st_model", lambda: (None, None))
     vague_only = "We use your email address to improve our services."
@@ -2011,6 +2012,17 @@ def test_V2_vagueness_is_judged_for_the_whole_notice(monkeypatch):
     both = vague_only + " We use your email address to send you payment receipts."
     _, w = pp._pass2_extract_purposes(both.lower(), {P.EMAIL}, full_text_raw=both)
     assert w == []
+
+
+def test_V2b_default_scope_reports_every_generic_statement(monkeypatch):
+    monkeypatch.delenv("PRIVACYPILOT_VAGUENESS_SCOPE", raising=False)
+    monkeypatch.setattr(pp, "_get_nlp", lambda: None)
+    monkeypatch.setattr(pp, "_get_st_model", lambda: (None, None))
+    assert pp.vagueness_scope() == "statement"
+    both = ("We use your email address to improve our services. "
+            "We use your email address to send you payment receipts.")
+    _, w = pp._pass2_extract_purposes(both.lower(), {P.EMAIL}, full_text_raw=both)
+    assert [x["pii_category"] for x in w] == ["email"]
 
 
 def test_V3_classifier_margin_alone_is_not_vagueness(monkeypatch):
