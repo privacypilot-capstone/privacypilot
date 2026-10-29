@@ -1,0 +1,105 @@
+{
+ "urbanclap-engg/smart-docs-parser": {
+  "units": [],
+  "files_with_mentions": 10,
+  "files_in_prompt": 10,
+  "raw": "[]"
+ },
+ "surepassio/mrz-surepass": {
+  "units": [],
+  "files_with_mentions": 94,
+  "files_in_prompt": 94,
+  "raw": "```json\n[]\n```"
+ },
+ "Sunbird-Ed/SunbirdEd-portal": {
+  "units": [],
+  "files_with_mentions": 714,
+  "files_in_prompt": 30,
+  "raw": "[]"
+ },
+ "Sunbird-Ed/SunbirdEd-mobile-app": {
+  "units": [],
+  "files_with_mentions": 261,
+  "files_in_prompt": 31,
+  "raw": "[]"
+ },
+ "Sunbird-Ed/sunbird-client-services": {
+  "units": [
+   [
+    "Notice gap",
+    "date_of_birth",
+    null
+   ],
+   [
+    "Notice gap",
+    "phone",
+    null
+   ]
+  ],
+  "files_with_mentions": 61,
+  "files_in_prompt": 41,
+  "raw": "```json\n[\n  {\n    \"check\": \"Notice gap\",\n    \"category\": \"phone\",\n    \"recipient\": null,\n    \"evidence\": \"src/services/user/interface/cs-user-service.ts\"\n  },\n  {\n    \"check\": \"Notice gap\",\n    \"category\": \"date_of_birth\",\n    \"recipient\": null,\n    \"evidence\": \"src/services/user/interface/cs-user-service.ts\"\n  }\n]\n```"
+ },
+ "razorpay/razorpay-python": {
+  "units": [
+   [
+    "Personal data in logs",
+    "email",
+    "logs"
+   ],
+   [
+    "Personal data in logs",
+    "phone",
+    "logs"
+   ]
+  ],
+  "files_with_mentions": 55,
+  "files_in_prompt": 55,
+  "raw": "```json\n[\n  {\n    \"check\": \"Personal data in logs\",\n    \"category\": \"email\",\n    \"recipient\": \"logs\",\n    \"evidence\": \"razorpay/client.py\"\n  },\n  {\n    \"check\": \"Personal data in logs\",\n    \"category\": \"phone\",\n    \"recipient\": \"logs\",\n    \"evidence\": \"razorpay/client.py\"\n  }\n]\n```"
+ },
+ "razorpay/razorpay-node": {
+  "units": [
+   [
+    "Notice gap",
+    "location",
+    null
+   ],
+   [
+    "Notice gap",
+    "name",
+    null
+   ],
+   [
+    "Notice gap",
+    "pan",
+    null
+   ]
+  ],
+  "files_with_mentions": 75,
+  "files_in_prompt": 75,
+  "raw": "```json\n[\n  {\n  \"check\": \"Notice gap\",\n  \"category\": \"pan\",\n  \"recipient\": null,\n  \"evidence\": \"lib/types/accounts.d.ts\"\n},\n  {\n  \"check\": \"Notice gap\",\n  \"category\": \"name\",\n  \"recipient\": null,\n  \"evidence\": \"lib/types/orders.d.ts\"\n},\n  {\n  \"check\": \"Notice gap\",\n  \"category\": \"location\",\n  \"recipient\": null,\n  \"evidence\": \"test/resources/customers.spec.js\"\n}\n]\n```"
+ },
+ "zerodha/pykiteconnect": {
+  "units": [],
+  "files_with_mentions": 16,
+  "files_in_prompt": 16,
+  "raw": "[]"
+ },
+ "zerodha/kiteconnectjs": {
+  "units": [
+   [
+    "Personal data in logs",
+    "email",
+    "logs"
+   ],
+   [
+    "Personal data in logs",
+    "name",
+    "logs"
+   ]
+  ],
+  "files_with_mentions": 9,
+  "files_in_prompt": 9,
+  "raw": "```json\n[\n  {\n    \"check\": \"Personal data in logs\",\n    \"category\": \"email\",\n    \"recipient\": \"logs\",\n    \"evidence\": \"types/connect.d.ts\"\n  },\n  {\n    \"check\": \"Personal data in logs\",\n    \"category\": \"name\",\n    \"recipient\": \"logs\",\n    \"evidence\": \"test/test.ts\"\n  }\n]\n```"
+ }
+}
