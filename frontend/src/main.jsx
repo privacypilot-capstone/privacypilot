@@ -9,6 +9,7 @@ import History    from './History';
 import ScanDetail from './ScanDetail';
 import DpdpaDetail from './DpdpaDetail';
 import AboutUs    from './AboutUs';
+import Legal      from './Legal';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -20,6 +21,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         <Route path="/scan/:id"    element={<ScanDetail />} />
         <Route path="/dpdpa/:slug" element={<DpdpaDetail />} />
         <Route path="/about"      element={<AboutUs />} />
+        <Route path="/legal"      element={<Legal />} />
       </Routes>
     </BrowserRouter>
   </React.StrictMode>

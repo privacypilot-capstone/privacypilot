@@ -3,6 +3,7 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")  # explicit path
 
 import asyncio
+import re
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -16,7 +17,7 @@ from scanners.policy_parser import parse_privacy_policy
 from dpdp.rule_engine import run_dpdp_rules
 from database import (create_tables, migrate_tables, get_db, scan_gap_categories,
                        describe_database_url, database_instance_id,
-                       Scan, Finding, Violation, ChatSession, ChatMessage)
+                       Scan, Finding, Violation, ChatSession, ChatMessage, DemoRequest)
 from scoring import calculate_compliance_score
 from report_generator import generate_report_html
 from models.dataflow import PIICategory
@@ -329,6 +330,64 @@ def health():
         # No user names or passwords are included.
         "database":   db_check,
     }
+
+
+# ── Demo requests ─────────────────────────────────────────────────────────────
+# Version of the notice shown in the "See demo" consent step
+# (frontend/src/legalNotice.js). Bump both together when the notice text changes.
+DEMO_NOTICE_VERSION = "2026-10-29"
+DEMO_RETENTION_DAYS = 365   # stated in the notice
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+class DemoRequestIn(BaseModel):
+    name: str
+    email: str
+    organisation: str = ""
+    role: str = ""
+    use_case: str = ""
+    accepted_terms: bool = False
+    consent_contact: bool = False
+    consent_updates: bool = False
+    notice_version: str = ""
+
+
+@app.post("/demo-requests", status_code=201)
+def create_demo_request(req: DemoRequestIn, db: Session = Depends(get_db)):
+    """Record a demo request and the consent given for it.
+
+    Consent must be specific and given by a clear affirmative action, so both
+    the terms and the contact consent must be ticked and the notice version
+    must be the current one; otherwise nothing is stored.
+    """
+    name, email = req.name.strip(), req.email.strip().lower()
+    errors = {}
+    if not 1 <= len(name) <= 100:
+        errors["name"] = "Please enter your name (up to 100 characters)."
+    if len(email) > 254 or not _EMAIL_RE.match(email):
+        errors["email"] = "Please enter a valid e-mail address."
+    if len(req.organisation) > 120 or len(req.role) > 80 or len(req.use_case) > 1000:
+        errors["details"] = "One of the fields is too long."
+    if not (req.accepted_terms and req.consent_contact):
+        errors["consent"] = "Please accept the terms and the processing consent to watch the demo."
+    if req.notice_version != DEMO_NOTICE_VERSION:
+        errors["notice_version"] = "The notice has changed; please reload the page."
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+    row = DemoRequest(name=name, email=email,
+                      organisation=req.organisation.strip() or None,
+                      role=req.role.strip() or None,
+                      use_case=req.use_case.strip() or None,
+                      accepted_terms=True, consent_contact=True,
+                      consent_updates=bool(req.consent_updates),
+                      notice_version=DEMO_NOTICE_VERSION)
+    db.add(row)
+    # The notice promises deletion after 12 months; purge expired rows here.
+    db.query(DemoRequest).filter(
+        DemoRequest.consented_at < datetime.utcnow() - timedelta(days=DEMO_RETENTION_DAYS)
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"id": row.id, "notice_version": DEMO_NOTICE_VERSION}
 
 
 @app.post("/scan")

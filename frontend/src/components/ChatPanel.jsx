@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { MessageCircle, X, Sparkle, Send } from './Icons';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -20,7 +21,7 @@ export default function ChatPanel({ scanId }) {
         setSession(d.session_id);
         setMessages([{
           role: 'assistant',
-          content: `👋 Hi! I'm your DPDP compliance advisor for this scan.\n\nAsk me anything about the violations found, how to fix them, or what the DPDP Act requires.`,
+          content: `Hi! I'm your DPDP compliance advisor for this scan.\n\nAsk me anything about the violations found, how to fix them, or what the DPDP Act requires.`,
         }]);
       })
       .catch(() => {});
@@ -46,7 +47,7 @@ export default function ChatPanel({ scanId }) {
       const d = await r.json();
       setMessages(m => [...m, { role: 'assistant', content: d.content }]);
     } catch {
-      setMessages(m => [...m, { role: 'assistant', content: '⚠️ Could not reach the AI advisor. Please try again.' }]);
+      setMessages(m => [...m, { role: 'assistant', content: 'Could not reach the AI advisor. Please try again.' }]);
     } finally {
       setTyping(false);
     }
@@ -63,8 +64,9 @@ export default function ChatPanel({ scanId }) {
         className="chat-fab"
         onClick={() => { setOpen(o => !o); setTimeout(() => inputRef.current?.focus(), 200); }}
         title="AI Compliance Advisor"
+        aria-label={open ? "Close chat" : "Open AI compliance advisor"}
       >
-        {open ? '✕' : '💬'}
+        {open ? <X size={22} /> : <MessageCircle size={22} />}
       </button>
 
       {/* Chat Panel */}
@@ -72,12 +74,12 @@ export default function ChatPanel({ scanId }) {
         <div className="chat-panel animate-in">
           {/* Header */}
           <div className="chat-header">
-            <div className="chat-header-icon">🤖</div>
+            <div className="chat-header-icon"><Sparkle size={18} /></div>
             <div>
               <div className="chat-header-title">AI Compliance Advisor</div>
               <div className="chat-header-sub">DPDP Act 2023 Expert</div>
             </div>
-            <button className="chat-close" onClick={() => setOpen(false)}>✕</button>
+            <button className="chat-close" onClick={() => setOpen(false)} aria-label="Close chat"><X size={16} /></button>
           </div>
 
           {/* Messages */}
@@ -125,7 +127,7 @@ export default function ChatPanel({ scanId }) {
               onClick={send}
               disabled={!input.trim() || !sessionId || typing}
             >
-              ➤
+              <Send size={16} />
             </button>
           </div>
         </div>

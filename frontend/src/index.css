@@ -3239,3 +3239,16 @@ input, textarea, select { font-family: var(--font); }
   .sa-hero-h1 { letter-spacing: -1px; }
   .sa-main { padding: 32px 16px 56px; }
 }
+
+/* Icons that replaced emoji on the scan page */
+.sa-label-tag { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.sa-step-check { display: inline-flex; align-items: center; justify-content: center; }
+/* Keep browser-autofilled fields dark instead of the default light blue */
+.sa-input:-webkit-autofill,
+.sa-input:-webkit-autofill:hover,
+.sa-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #fff;
+  -webkit-box-shadow: 0 0 0 1000px #15171c inset;
+  caret-color: #fff;
+  transition: background-color 9999s ease-out 0s;
+}

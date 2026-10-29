@@ -1,0 +1,26 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.500
+PrivacyPilot: How a DPDP Act scan works
+
+00:00:03.500 --> 00:00:09.500
+Start a scan: Paste the repository URL, your privacy policy link and a GitHub token.
+
+00:00:09.500 --> 00:00:15.000
+Live progress: The repository is downloaded, scanned in parallel chunks and compared with the policy.
+
+00:00:15.000 --> 00:00:21.500
+Results at a glance: Score, undisclosed data categories and an optional AI executive summary.
+
+00:00:21.500 --> 00:00:27.000
+Violations by provision: Each finding names the DPDP Act section and its severity.
+
+00:00:27.000 --> 00:00:33.000
+Evidence and a fix: Open a finding to see the exact file and line, and what to change.
+
+00:00:33.000 --> 00:00:39.000
+Every finding, filterable: Search all personal-data findings by category, origin and destination.
+
+00:00:39.000 --> 00:00:43.000
+Run your first scan: Findings are indicators for legal review, not legal advice.
+

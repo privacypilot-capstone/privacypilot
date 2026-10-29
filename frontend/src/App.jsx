@@ -2,16 +2,17 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from './Layout';
 import ResultsDashboard from './components/ResultsDashboard';
+import { Check, Lock } from './components/Icons';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// Steps follow the scan's real phases on the server (backend/tasks.py):
+// downloading → scanning (the policy is parsed in parallel) → finalizing.
 const SCAN_STEPS = [
-  { label: 'Downloading repository',    sub: 'Fetching the whole repository as one archive' },
-  { label: 'Scanning for PII',          sub: 'Running regex + NER classifiers' },
-  { label: 'Parsing privacy policy',    sub: 'Extracting PII disclosures' },
-  { label: 'Detecting consent gaps',    sub: 'Comparing code vs. policy claims' },
-  { label: 'Running DPDP rule engine',  sub: 'Checking 4 DPDP Act provisions + Rule 3(b)(ii)' },
-  { label: 'Computing compliance score',sub: 'Calculating risk-weighted score' },
+  { label: 'Downloading repository',             sub: 'One archive of the selected commit; no Git history is needed', phases: ['queued', 'downloading'] },
+  { label: 'Scanning code for personal data',    sub: 'Pattern, named-entity and data-flow analysis in parallel chunks', phases: ['scanning'] },
+  { label: 'Reading the privacy policy',         sub: 'Disclosed data, stated purposes and named third parties', phases: ['scanning'] },
+  { label: 'Applying DPDP Act checks',           sub: 'Comparing code with the policy, then scoring the findings', phases: ['finalizing'] },
 ];
 
 const LogoMark = () => (
@@ -77,7 +78,7 @@ export default function App() {
   // Which step is active comes from the scan's real phase on the server
   // (not a timer): downloading → scanning (with file counts) → finalizing.
   const phase   = live?.phase || 'queued';
-  const stepIdx = phase === 'finalizing' ? 4
+  const stepIdx = phase === 'finalizing' ? 3
                 : phase === 'scanning'   ? 1
                 : 0;
 
@@ -155,9 +156,11 @@ export default function App() {
   };
 
   const canScan  = repo.trim() && policy.trim() && token.trim() && !loading;
-  const progress = phase === 'finalizing' ? 95
-                 : phase === 'scanning'   ? 10 + 0.8 * (live?.percent ?? 0)
-                 : 5;
+  // Overall progress across all phases, not just the file count of one phase:
+  // downloading 0–10 %, scanning 10–80 %, final checks 80–95 %.
+  const progress = phase === 'finalizing' ? 88
+                 : phase === 'scanning'   ? 10 + 0.7 * Math.min(100, live?.percent ?? 0)
+                 : 4;
   const stepSub  = phase === 'scanning' && live?.files_total != null
                  ? `${live.files_done.toLocaleString()} of ${live.files_total.toLocaleString()} source files scanned`
                  : phase.startsWith('waiting')
@@ -234,21 +237,26 @@ export default function App() {
             </div>
 
             <div className="sa-steps-list">
-              {SCAN_STEPS.map((s, i) => (
+              {SCAN_STEPS.map((s, i) => {
+                const p = phase.startsWith('waiting') ? 'downloading' : phase;
+                const active = s.phases.includes(p);
+                const done = !active && i < SCAN_STEPS.findIndex(x => x.phases.includes(p));
+                return (
                 <div
                   key={i}
-                  className={`sa-step-row${i === stepIdx ? ' sa-step-active' : i < stepIdx ? ' sa-step-done' : ''}`}
+                  className={`sa-step-row${active ? ' sa-step-active' : done ? ' sa-step-done' : ''}`}
                 >
                   <div className="sa-step-indicator">
-                    {i < stepIdx
-                      ? <span className="sa-step-check">✓</span>
-                      : i === stepIdx
+                    {done
+                      ? <span className="sa-step-check"><Check size={12} /></span>
+                      : active
                         ? <span className="sa-step-spin" />
                         : null}
                   </div>
                   <span className="sa-step-text">{s.label}</span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ) : (
@@ -265,8 +273,8 @@ export default function App() {
                 <em className="sa-hero-em">Know your risk.</em>
               </h1>
               <p className="sa-hero-p">
-                Drop in a GitHub repo and a privacy policy URL — get a full compliance
-                report in under 60 seconds.
+                Paste a GitHub repository and your privacy policy link. PrivacyPilot checks
+                both against the DPDP Act and shows the evidence behind every finding.
               </p>
             </header>
 
@@ -288,6 +296,9 @@ export default function App() {
                     type="url"
                     className="sa-input"
                     placeholder="https://github.com/org/repo"
+                    name="repo_url"
+                    autoComplete="off"
+                    spellCheck={false}
                     value={repo}
                     onChange={e => setRepo(e.target.value)}
                   />
@@ -303,6 +314,9 @@ export default function App() {
                     type="url"
                     className="sa-input"
                     placeholder="https://yourapp.com/privacy"
+                    name="policy_url"
+                    autoComplete="off"
+                    spellCheck={false}
                     value={policy}
                     onChange={e => setPolicy(e.target.value)}
                   />
@@ -313,7 +327,7 @@ export default function App() {
               <div className="sa-field">
                 <label className="sa-label">
                   GitHub Personal Access Token
-                  <span className="sa-label-tag">🔒 never stored</span>
+                  <span className="sa-label-tag"><Lock size={11} /> never stored</span>
                 </label>
                 <div className="sa-input-row">
                   <span className="sa-icon"><LockIcon /></span>
@@ -321,6 +335,11 @@ export default function App() {
                     type="password"
                     className="sa-input"
                     placeholder="ghp_••••••••••••••••••••••"
+                    name="github_token"
+                    autoComplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    spellCheck={false}
                     value={token}
                     onChange={e => setToken(e.target.value)}
                   />
@@ -340,7 +359,7 @@ export default function App() {
 
             {/* Feature chips */}
             <div className="sa-chips">
-              {['PII Detection','Consent Gaps','SDK Checks','AI Summary','PDF Report','Compliance Chat'].map(c => (
+              {['Personal data detection','Notice gaps','Third-party SDKs','AI summary','PDF report','Compliance chat'].map(c => (
                 <span key={c} className="sa-chip">{c}</span>
               ))}
             </div>

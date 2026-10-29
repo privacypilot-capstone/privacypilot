@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import ScoreRing from './ScoreRing';
 import ChatPanel from './ChatPanel';
+import { CheckCircle, Sparkle, AlertTriangle, AlertOctagon, Search, ShieldAlert, ShieldCheck, FileText, Download } from './Icons';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -87,7 +88,7 @@ function ViolationCard({ v }) {
           )}
           <div className="v-detail-row">
             <div className="v-detail-label">Fix</div>
-            <div className="v-detail-value fix">✅ {v.recommendation}</div>
+            <div className="v-detail-value fix" style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}><CheckCircle size={15} style={{ marginTop: 2, color: '#16a34a' }} /><span>{v.recommendation}</span></div>
           </div>
         </div>
       )}
@@ -115,7 +116,7 @@ function AISummary({ text }) {
   return (
     <div className="ai-card mb-24 animate-in">
       <div className="ai-card-header">
-        <div className="ai-card-icon">✦</div>
+        <div className="ai-card-icon"><Sparkle size={16} /></div>
         <div>
           <div className="ai-card-title">AI Executive Summary</div>
         </div>
@@ -339,7 +340,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
       {result?.warning && (
         <div className="card card-pad mb-24" role="status"
              style={{ background: '#fffbeb', border: '1px solid #f59e0b', color: '#92400e', fontSize: 13.5 }}>
-          ⚠️ {result.warning}
+          <AlertTriangle size={15} style={{ verticalAlign: -3, marginRight: 6 }} />{result.warning}
         </div>
       )}
       {/* ── What was scanned ── */}
@@ -369,7 +370,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
       {/* ── Metric strip ── */}
       <div className="metrics-row mb-24">
         <div className="metric-card">
-          <div className="metric-icon" style={{ background: '#f0f9ff', fontSize: 20 }}>🔍</div>
+          <div className="metric-icon" style={{ background: '#f0f9ff', color: '#0ea5e9' }}><Search size={20} /></div>
           <div className="metric-label">PII Findings</div>
           <div className="metric-value" style={{ color: '#0ea5e9' }}>
             {result?.findings_count ?? findings?.length ?? '—'}
@@ -377,7 +378,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           <div className="metric-sub">in source code</div>
         </div>
         <div className="metric-card">
-          <div className="metric-icon" style={{ background: '#fef2f2', fontSize: 20 }}>🚨</div>
+          <div className="metric-icon" style={{ background: '#fef2f2', color: '#ef4444' }}><AlertOctagon size={20} /></div>
           <div className="metric-label">Violations</div>
           <div className="metric-value" style={{ color: violations?.length > 0 ? '#ef4444' : '#22c55e' }}>
             {violations?.length ?? '—'}
@@ -385,7 +386,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           <div className="metric-sub">DPDP act breaches</div>
         </div>
         <div className="metric-card">
-          <div className="metric-icon" style={{ background: '#fffbeb', fontSize: 20 }}>⚠️</div>
+          <div className="metric-icon" style={{ background: '#fffbeb', color: '#f59e0b' }}><AlertTriangle size={20} /></div>
           <div className="metric-label">Consent Gaps</div>
           <div className="metric-value" style={{ color: gaps?.length > 0 ? '#f59e0b' : '#22c55e' }}>
             {gaps?.length ?? '—'}
@@ -393,8 +394,8 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           <div className="metric-sub">undisclosed PII types</div>
         </div>
         <div className="metric-card">
-          <div className="metric-icon" style={{ background: counts.critical > 0 ? '#fef2f2' : '#f0fdf4', fontSize: 20 }}>
-            {counts.critical > 0 ? '🔴' : '🟢'}
+          <div className="metric-icon" style={{ background: counts.critical > 0 ? '#fef2f2' : '#f0fdf4', color: counts.critical > 0 ? '#ef4444' : '#22c55e' }}>
+            {counts.critical > 0 ? <ShieldAlert size={20} /> : <ShieldCheck size={20} />}
           </div>
           <div className="metric-label">Critical Issues</div>
           <div className="metric-value" style={{ color: counts.critical > 0 ? '#ef4444' : '#22c55e' }}>
@@ -423,10 +424,10 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           {/* Report buttons */}
           <div style={{ marginTop: 20, display: 'flex', gap: 8, width: '100%' }}>
             <a href={reportUrl} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm" style={{ flex: 1, justifyContent: 'center' }}>
-              📄 HTML
+              <FileText size={14} style={{ marginRight: 6 }} />HTML
             </a>
             <a href={reportPdfUrl} target="_blank" rel="noreferrer" className="btn btn-primary btn-sm" style={{ flex: 1, justifyContent: 'center' }}>
-              ⬇ PDF
+              <Download size={14} style={{ marginRight: 6 }} />PDF
             </a>
           </div>
         </div>
@@ -445,7 +446,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
           {!aiLoading && aiSummary && <AISummary text={aiSummary} />}
           {!aiLoading && !aiSummary && (
             <div className="card card-pad" style={{ color: 'var(--text-muted)', fontSize: 13.5, textAlign: 'center', padding: 32 }}>
-              <div style={{ fontSize: 32, marginBottom: 12 }}>🤖</div>
+              <div style={{ marginBottom: 12, color: 'var(--text-muted)', display: 'flex', justifyContent: 'center' }}><Sparkle size={30} /></div>
               {aiError ? (
                 <div>AI summary unavailable — {aiError}</div>
               ) : (
@@ -459,7 +460,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
             <div className="card" style={{ marginTop: 16 }}>
               <div className="card-header">
                 <div>
-                  <div className="card-header-title">⚠️ Consent Gaps</div>
+                  <div className="card-header-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><AlertTriangle size={16} style={{ color: '#f59e0b' }} />Consent Gaps</div>
                   <div className="card-header-subtitle">PII types in code not disclosed in privacy policy</div>
                 </div>
                 <span className="section-count" style={{ marginLeft: 'auto' }}>{gaps.length}</span>

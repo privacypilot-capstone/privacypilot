@@ -148,6 +148,29 @@ class InstanceMeta(Base):
     value = Column(String, nullable=False)
 
 
+# ── Demo requests (landing page "See demo") ──────────────────────────────────
+
+class DemoRequest(Base):
+    """
+    A visitor who asked to watch the product demo, with the consent they gave.
+    Only what the notice lists is stored; the notice version and the time of
+    consent are kept so the consent can be shown later (DPDP Act S. 6).
+    """
+    __tablename__ = "demo_requests"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    name             = Column(String(100), nullable=False)
+    email            = Column(String(254), nullable=False, index=True)
+    organisation     = Column(String(120), nullable=True)
+    role             = Column(String(80),  nullable=True)
+    use_case         = Column(Text,        nullable=True)
+    accepted_terms   = Column(Boolean, nullable=False, default=False)
+    consent_contact  = Column(Boolean, nullable=False, default=False)   # required to watch
+    consent_updates  = Column(Boolean, nullable=False, default=False)   # optional
+    notice_version   = Column(String(20),  nullable=False)
+    consented_at     = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 # ── Chat tables (LLM compliance chatbot) ─────────────────────────────────────
 
 class ChatSession(Base):

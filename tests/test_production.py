@@ -2312,3 +2312,61 @@ def test_H6_scan_records_and_exposes_the_vagueness_setting(monkeypatch):
     assert main._coverage_summary(S)["vagueness_scope"] == "statement"
     class Old: coverage = json.dumps({"scanned": 1, "total_source_files": 1})
     assert main._coverage_summary(Old)["vagueness_scope"] is None
+
+
+# ── Demo requests (landing page "See demo") ───────────────────────────────────
+
+def _demo_payload(main, **over):
+    p = {"name": "Asha Rao", "email": "Asha@Example.com", "organisation": "Acme",
+         "role": "DPO", "use_case": "Check our app", "accepted_terms": True,
+         "consent_contact": True, "consent_updates": False,
+         "notice_version": main.DEMO_NOTICE_VERSION}
+    p.update(over)
+    return p
+
+
+def test_D1_demo_request_is_stored_with_its_consent(mem_db):
+    import database
+    client, main = _client(mem_db)
+    try:
+        r = client.post("/demo-requests", json=_demo_payload(main))
+        assert r.status_code == 201, r.text
+        db = mem_db()
+        row = db.query(database.DemoRequest).one()
+        assert row.email == "asha@example.com" and row.consent_contact and row.accepted_terms
+        assert row.notice_version == main.DEMO_NOTICE_VERSION and row.consented_at is not None
+        db.close()
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_D2_demo_request_without_consent_or_valid_email_is_rejected(mem_db):
+    import database
+    client, main = _client(mem_db)
+    try:
+        for bad in ({"consent_contact": False}, {"accepted_terms": False},
+                    {"email": "not-an-email"}, {"name": "  "}, {"notice_version": "old"}):
+            assert client.post("/demo-requests", json=_demo_payload(main, **bad)).status_code == 422
+        db = mem_db()
+        assert db.query(database.DemoRequest).count() == 0      # nothing stored without consent
+        db.close()
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_D3_demo_requests_older_than_the_retention_period_are_deleted(mem_db):
+    import database
+    from datetime import datetime, timedelta
+    client, main = _client(mem_db)
+    try:
+        db = mem_db()
+        db.add(database.DemoRequest(name="Old", email="old@example.com", accepted_terms=True,
+                                    consent_contact=True, notice_version="2025-01-01",
+                                    consented_at=datetime.utcnow() - timedelta(days=main.DEMO_RETENTION_DAYS + 1)))
+        db.commit(); db.close()
+        assert client.post("/demo-requests", json=_demo_payload(main)).status_code == 201
+        db = mem_db()
+        assert [r.email for r in db.query(database.DemoRequest).all()] == ["asha@example.com"]
+        db.close()
+    finally:
+        main.app.dependency_overrides.clear()
