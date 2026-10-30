@@ -7,7 +7,10 @@ import '../term.css';
    hover, on keyboard focus, and on tap (touch screens); Escape, scrolling
    or a tap elsewhere closes it. It is drawn in <body> so tables and cards
    with overflow: hidden cannot clip it. */
-export default function Term({ k, children, text, className = '' }) {
+/* inButton: the term sits inside a button (e.g. a filter tab). The
+   explanation then shows on hover and when the button has keyboard focus,
+   and a click goes to the button as usual instead of opening the tip. */
+export default function Term({ k, children, text, className = '', inButton = false }) {
   const entry = text ? { text } : lookup(k);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
@@ -59,15 +62,15 @@ export default function Term({ k, children, text, className = '' }) {
       <span
         ref={ref}
         className={`term ${className}`}
-        tabIndex={0}
-        role="button"
+        tabIndex={inButton ? undefined : 0}
+        role={inButton ? undefined : 'button'}
         aria-describedby={open ? id : undefined}
         onMouseEnter={show}
         onMouseLeave={hide}
-        onFocus={() => setOpen(true)}
-        onBlur={hide}
-        onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setOpen(o => !o); } }}
+        onFocus={inButton ? undefined : () => setOpen(true)}
+        onBlur={inButton ? undefined : hide}
+        onClick={inButton ? () => setOpen(false) : (e) => { e.stopPropagation(); setOpen(o => !o); }}
+        onKeyDown={inButton ? undefined : (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setOpen(o => !o); } }}
       >
         {children ?? entry.term}
       </span>

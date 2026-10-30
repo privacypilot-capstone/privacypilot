@@ -248,7 +248,7 @@ function AllFindings({ scanId, fallback }) {
                         onClick={() => update({ origin: o })}>
                   {o === '' ? 'All origins'
                     : o === 'first_party' ? `${ORIGIN_LABEL[o]} (${facets.origin[o]})`
-                    : <><Term k={`origin_${o}`}>{ORIGIN_LABEL[o]}</Term> ({facets.origin[o]})</>}
+                    : <><Term inButton k={`origin_${o}`}>{ORIGIN_LABEL[o]}</Term> ({facets.origin[o]})</>}
                 </button>
               ) : null
             ))}
@@ -534,7 +534,7 @@ export default function ResultsDashboard({ scanId, result, violations, findings,
                   className={`filter-tab ${sevFilter === f ? 'active' : ''}`}
                   onClick={() => setSevFilter(f)}
                 >
-                  {f === 'all' ? 'All' : <Term k={`sev_${f}`}>{f.charAt(0).toUpperCase() + f.slice(1)}</Term>}
+                  {f === 'all' ? 'All' : <Term inButton k={`sev_${f}`}>{f.charAt(0).toUpperCase() + f.slice(1)}</Term>}
                   {f !== 'all' && counts[f] > 0 && ` (${counts[f]})`}
                 </button>
               ))}
