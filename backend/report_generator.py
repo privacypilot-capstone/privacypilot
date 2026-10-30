@@ -1,4 +1,5 @@
 import re
+from textfmt import detector_label
 from datetime import datetime
 from html import escape as _esc
 
@@ -25,6 +26,8 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
     }
 
     # Build violations HTML — every violation, each with every code location
+    from database import number_violations
+    violations = number_violations(violations)
     parts = []
     for v in violations:
         color = severity_color.get(v.severity, "#666")
@@ -38,7 +41,7 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
         parts.append(f"""
         <div class="violation">
             <div class="violation-header">
-                <span class="section">{_e(v.dpdp_section)} — {_e(v.section_title)}</span>
+                <span class="section">{f'<span class="vid">{_e(v.ref)}</span>' if getattr(v, 'ref', None) else ''}{_e(v.dpdp_section)} — {_e(v.section_title)}</span>
                 <span class="badge" style="background:{color}">{_e((v.severity or '').upper())}</span>
             </div>
             <div class="violation-body">
@@ -61,7 +64,7 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
             f"<td class=\"path\">{_e(f.file_path or 'N/A')}</td><td>{_e(f.line_number or 'N/A')}</td>"
             f"<td>{_e(_origin.get(f.origin or 'first_party', f.origin))}</td>"
             f"<td>{_e(f.third_party_sdk or '—')}</td>"
-            f"<td class=\"code\">{_e(f.raw_text)}</td><td>{_e(f.source)}</td></tr>"
+            f"<td class=\"code\">{_e(f.raw_text)}</td><td>{_e(detector_label(f.source))}</td></tr>"
         )
     findings_html = "".join(rows)
     n_findings = len(findings)
@@ -84,13 +87,10 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
     if narrative:
         # Escape the LLM text first, THEN convert **bold** to <strong>, so
         # model output (which can echo policy text) cannot inject HTML.
-        def _md_to_html(text):
-            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', _e(text))
-            paras = [p.strip() for p in text.split('\n\n') if p.strip()]
-            return '\n'.join(f'<p>{p}</p>' for p in paras)
+        from textfmt import to_html as _md_to_html
         narrative_html = f'''
         <div class="narrative">
-          <h3>&#x1F4CA; AI-Generated Executive Summary</h3>
+          <h3>AI-Generated Executive Summary</h3>
           {_md_to_html(narrative)}
         </div>'''
     else:
@@ -166,7 +166,10 @@ def generate_report_html(scan, violations, findings, compliance, narrative: str 
     letter-spacing: 0.3px;
   }}
   .narrative p {{ margin: 8px 0; }}
-  .narrative strong {{ color: #1a1a2e; }}
+  .narrative strong, .narrative b {{ color: #1a1a2e; }}
+  .narrative code {{ font-family: Consolas, monospace; font-size: 0.92em; background: #eef1f6; padding: 1px 4px; border-radius: 3px; }}
+  .narrative ul, .narrative ol {{ margin: 6px 0 6px 20px; padding: 0; }}
+  .vid {{ display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 4px; background: #1a1a2e; color: #fff; font-size: 0.85em; font-family: Consolas, monospace; }}
   .gap-tag {{
     display: inline-block; background: #fff3cd;
     border: 1px solid #ffc107; border-radius: 4px;

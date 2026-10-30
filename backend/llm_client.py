@@ -17,6 +17,7 @@ If no key is set at all, raises LLMNotConfiguredError so callers degrade
 gracefully (summary = None, chatbot returns a static notice).
 """
 
+from textfmt import clean_summary
 import os
 import json
 import requests
@@ -49,7 +50,7 @@ _MAX_LOCS       = 50          # code locations per violation given to the model
 
 # ── DPDP expert system prompt ─────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """You are PrivacyPilot Advisor — an expert compliance assistant \
+_SYSTEM_PROMPT = """You are Vidhi, PrivacyPilot's compliance assistant \
 specialising in India's Digital Personal Data Protection (DPDP) Act 2023.
 
 Your deep knowledge covers:
@@ -77,7 +78,12 @@ that context — cite exact file paths, line numbers, and DPDP sections when rel
 
 Be concise, practical, and actionable. Never fabricate evidence; if something is not \
 in the scan data, say so. If asked for legal advice beyond the Act's text, recommend \
-consulting a qualified lawyer."""
+consulting a qualified lawyer.
+
+Formatting: reply in short paragraphs. You may use **bold** for key terms, \
+`code` for file paths and identifiers, and "- " bullet or "1. " numbered lists. \
+Do not use tables, headings or any other Markdown. Introduce yourself as Vidhi \
+only when greeted or asked who you are."""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -93,7 +99,7 @@ def _scan_context_text(scan_data: dict) -> str:
         f"Repository : {scan_data.get('repo_url', 'unknown')}",
         f"Policy URL : {scan_data.get('policy_url', 'unknown')}",
         f"Scan ID    : {scan_data.get('scan_id', '?')}",
-        f"Score      : {scan_data.get('compliance', {}).get('score', '?')}/100  "
+        f"Score      : {scan_data.get('compliance', {}).get('score_display', scan_data.get('compliance', {}).get('score', '?'))}/100  "
         f"({scan_data.get('compliance', {}).get('rating', '?')} Compliance)",
         f"PII findings in code : {scan_data.get('code_findings_count', 0)}",
         f"Consent gaps         : {', '.join(scan_data.get('gaps_detected', [])) or 'none'}",
@@ -102,6 +108,7 @@ def _scan_context_text(scan_data: dict) -> str:
     ]
     for v in scan_data.get("violations", []):
         lines.append(
+            (f"{v['ref']} " if v.get('ref') else "") +
             f"[{v.get('severity','?').upper()}] {v.get('dpdp_section')} — "
             f"{v.get('section_title')}  |  PII: {v.get('pii_category')}"
         )
@@ -267,18 +274,21 @@ def generate_report_summary(scan_data: dict) -> str:
     system  = _SYSTEM_PROMPT + "\n\n" + context
 
     prompt = (
-        "Write a concise executive summary of this DPDP Act compliance scan. "
-        "Structure your response in exactly three paragraphs:\n\n"
-        "1. **Overall Compliance Posture** — summarise the score, critical issues, "
-        "and the most serious risks to the organisation.\n"
-        "2. **Most Urgent Violations** — call out the top 2–3 violations that need "
-        "immediate remediation, with the specific DPDP section and why it is critical.\n"
-        "3. **Remediation Roadmap** — a prioritised, actionable 3-step plan "
-        "the engineering team can follow to reach compliance.\n\n"
-        "Be specific: cite file paths and DPDP sections from the scan data. "
-        "Keep the total response under 300 words."
+        "Write a concise executive summary of this DPDP Act compliance scan "
+        "for a report. Write exactly three paragraphs, without headings:\n\n"
+        "1. Overall compliance posture: the score, the critical issues and the "
+        "most serious risks to the organisation.\n"
+        "2. Most urgent violations: the top 2-3 violations that need immediate "
+        "remediation, each named by its ID (e.g. V-03), with the DPDP section and "
+        "why it is urgent.\n"
+        "3. Remediation roadmap: a prioritised, actionable 3-step plan the "
+        "engineering team can follow.\n\n"
+        "Be specific: cite violation IDs, file paths and DPDP sections from the "
+        "scan data. Do not greet the reader, do not introduce yourself and do "
+        "not add a disclaimer (the report has its own). Write the score as it is "
+        "given. Keep the total under 300 words."
     )
-    return _llm_call(system, [{"role": "user", "content": prompt}])
+    return clean_summary(_llm_call(system, [{"role": "user", "content": prompt}]))
 
 
 def chat_completion(messages: list[dict], scan_data: dict) -> str:

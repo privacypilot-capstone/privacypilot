@@ -3,7 +3,7 @@
 // whenever the wording changes, so stored consents point to the text agreed to.
 export const NOTICE_VERSION = '2026-10-29';
 export const RETENTION = '12 months';
-export const CONTACT_EMAIL = import.meta.env.VITE_CONTACT_EMAIL || '';
+export const CONTACT_EMAIL = import.meta.env.VITE_CONTACT_EMAIL || 'privacypilot4u@gmail.com';
 // Your own screen recording: put it in public/demo/ (or anywhere) and set VITE_DEMO_VIDEO_URL.
 export const DEMO_VIDEO = import.meta.env.VITE_DEMO_VIDEO_URL || '';
 

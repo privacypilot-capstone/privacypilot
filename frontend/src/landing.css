@@ -338,3 +338,6 @@ html { scroll-behavior: smooth; }
 
 /* The connector line ran through the step cards; removed. */
 .lp-steps-wrap::before { display: none !important; }
+
+.lp-footer-about .lp-footer-mail { display: inline-block; margin-top: 12px; color: #34d399; font-size: 14px; font-weight: 600; text-decoration: none; }
+.lp-footer-about .lp-footer-mail:hover { text-decoration: underline; }

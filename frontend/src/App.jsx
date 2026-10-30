@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import Layout from './Layout';
 import ResultsDashboard from './components/ResultsDashboard';
 import { Check, Lock } from './components/Icons';
+import LogoMark from './components/LogoMark';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -14,19 +15,6 @@ const SCAN_STEPS = [
   { label: 'Reading the privacy policy',         sub: 'Disclosed data, stated purposes and named third parties', phases: ['scanning'] },
   { label: 'Applying DPDP Act checks',           sub: 'Comparing code with the policy, then scoring the findings', phases: ['finalizing'] },
 ];
-
-const LogoMark = () => (
-  <svg width="30" height="34" viewBox="0 0 64 72" fill="none">
-    <path d="M32 3 L60 14 V38 C60 55 48 67 32 72 C16 67 4 55 4 38 V14 Z"
-      fill="rgba(16,185,129,0.12)" stroke="#10b981" strokeWidth="1.5"/>
-    <rect x="31" y="30" width="2" height="22" fill="#10b981"/>
-    <rect x="23" y="52" width="18" height="2.5" rx="1.2" fill="#10b981"/>
-    <rect x="14" y="22" width="36" height="2" rx="1" fill="#10b981"/>
-    <circle cx="32" cy="21" r="2.5" fill="#10b981"/>
-    <rect x="14.5" y="24" width="1.5" height="9" fill="#10b981"/>
-    <rect x="48" y="24" width="1.5" height="9" fill="#10b981"/>
-  </svg>
-);
 
 const GithubIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
@@ -244,7 +232,7 @@ export default function App() {
       {/* Navbar */}
       <nav className="sa-nav">
         <Link to="/" className="sa-nav-logo">
-          <LogoMark />
+          <LogoMark size={32} />
           <span className="sa-nav-name">PrivacyPilot</span>
         </Link>
         <Link to="/" className="sa-nav-back">← Back to home</Link>

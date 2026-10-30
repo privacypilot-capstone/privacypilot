@@ -21,3 +21,5 @@ export const MessageCircle = I(<path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1
 export const X            = I(<><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>);
 export const Send         = I(<><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></>);
 export const Lock         = I(<><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>);
+export const BarChart     = I(<><line x1="3" y1="21" x2="21" y2="21" /><line x1="6" y1="17" x2="6" y2="11" /><line x1="12" y1="17" x2="12" y2="4" /><line x1="18" y1="17" x2="18" y2="8" /></>);
+export const XCircle      = I(<><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></>);

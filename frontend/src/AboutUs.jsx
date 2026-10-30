@@ -6,6 +6,8 @@ const TEAM = [
     role: 'Full-Stack & Compliance Engine',
     bio: 'Led the DPDPA rule engine design, PII detection pipeline, and frontend architecture. Focused on translating legal obligations into deterministic automated checks.',
     initials: 'NS',
+    photo: '/team/nishika-shah.webp',
+    linkedin: 'https://www.linkedin.com/in/nishika-shah-629b85268/',
     color: '#10b981',
   },
   {
@@ -13,6 +15,8 @@ const TEAM = [
     role: 'NLP & Policy Parsing',
     bio: 'Built the privacy policy parsing system — purpose extraction, PII category identification, and the vagueness classifier that powers the Rule 3(b)(ii) check.',
     initials: 'MM',
+    photo: '/team/mridulika-mukerji.webp',
+    linkedin: 'https://www.linkedin.com/in/mridulika-mukerji-abb229316/',
     color: '#6366f1',
   },
   {
@@ -20,6 +24,8 @@ const TEAM = [
     role: 'Backend & Report Generation',
     bio: 'Engineered the backend scan orchestration, scoring system, AI executive summary integration, and the PDF report generation pipeline.',
     initials: 'AN',
+    photo: '/team/atharva-naik.webp',
+    linkedin: 'https://www.linkedin.com/in/atharva-naik-015095214/',
     color: '#f59e0b',
   },
 ];
@@ -166,12 +172,24 @@ export default function AboutUs() {
           <div className="about-team-grid">
             {TEAM.map((m, i) => (
               <div key={i} className="about-team-card">
-                <div className="about-avatar" style={{ background: m.color + '20', color: m.color, border: `2px solid ${m.color}30` }}>
-                  {m.initials}
-                </div>
+                {m.photo
+                  ? <img className="about-avatar about-avatar-photo" src={m.photo} alt={`Photo of ${m.name}`}
+                      width="76" height="76" loading="lazy" style={{ border: `2px solid ${m.color}40` }} />
+                  : <div className="about-avatar" style={{ background: m.color + '20', color: m.color, border: `2px solid ${m.color}30` }}>
+                      {m.initials}
+                    </div>}
                 <div className="about-team-name">{m.name}</div>
                 <div className="about-team-role">{m.role}</div>
                 <p className="about-team-bio">{m.bio}</p>
+                {m.linkedin && (
+                  <a className="about-team-link" href={m.linkedin} target="_blank" rel="noopener noreferrer"
+                    aria-label={`${m.name} on LinkedIn (opens in a new tab)`}>
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+                      <path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.34V9h3.42v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/>
+                    </svg>
+                    LinkedIn
+                  </a>
+                )}
               </div>
             ))}
           </div>

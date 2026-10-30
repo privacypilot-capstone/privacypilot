@@ -1,7 +1,7 @@
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.colors import HexColor, white, black
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, CondPageBreak
 from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 import io
@@ -9,6 +9,7 @@ import re
 from xml.sax.saxutils import escape as _xml_escape
 
 from database import scan_gap_categories, violation_locations, location_label
+from textfmt import detector_label
 
 
 def _x(value) -> str:
@@ -41,7 +42,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     sub_style   = ParagraphStyle('sub',   fontSize=10, textColor=HexColor('#aaaaaa'),
         fontName='Helvetica', alignment=TA_CENTER)
     h2_style    = ParagraphStyle('h2',    fontSize=13, textColor=NAVY,
-        fontName='Helvetica-Bold', spaceBefore=14, spaceAfter=6)
+        fontName='Helvetica-Bold', spaceBefore=14, spaceAfter=6, keepWithNext=1)
     body_style  = ParagraphStyle('body',  fontSize=9,  textColor=black,
         fontName='Helvetica', spaceAfter=4, leading=13)
     small_style = ParagraphStyle('small', fontSize=8,  textColor=HexColor('#555555'),
@@ -108,6 +109,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
 
     # ── AI Executive Summary (narrative) ────────────────────────────────────
     if narrative:
+        story.append(CondPageBreak(45*mm))   # never strand a heading at a page foot
         story.append(Paragraph('AI-Generated Executive Summary', h2_style))
         story.append(HRFlowable(width=W, thickness=1, color=NAVY))
         story.append(Spacer(1, 2*mm))
@@ -122,17 +124,23 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
             fontName='Helvetica-Bold', spaceAfter=4,
         )
 
-        # Escape first, then convert **bold** markdown to <b> tags
-        def _md_to_pdf(text):
-            return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', _x(text))
-
-        # Wrap in a light-blue background table
-        paras = [p.strip() for p in narrative.split('\n\n') if p.strip()]
-        narr_content = '<br/><br/>'.join(_md_to_pdf(p) for p in paras)
-        narr_table = Table(
-            [[Paragraph(narr_content, narrative_style)]],
-            colWidths=[W]
-        )
+        # Light Markdown (bold, italic, `code`, lists) → ReportLab markup;
+        # the text is escaped first, so policy text echoed by the model
+        # cannot break the PDF.
+        from textfmt import clean_summary, blocks, inline_pdf
+        bullet_style = ParagraphStyle('narrli', parent=narrative_style,
+            leftIndent=14, bulletIndent=4, spaceAfter=3)
+        narr_flow = []
+        for kind, items in blocks(clean_summary(narrative) or ''):
+            if kind == 'p':
+                narr_flow.append(Paragraph('<br/>'.join(inline_pdf(l) for l in items), narrative_style))
+            else:
+                for n, item in enumerate(items, 1):
+                    narr_flow.append(Paragraph(inline_pdf(item), bullet_style,
+                        bulletText=('\u2022' if kind == 'ul' else f'{n}.')))
+        # Light-blue box; splitInRow lets a long summary continue on the
+        # next page instead of failing with "flowable too large".
+        narr_table = Table([[narr_flow]], colWidths=[W], splitInRow=1)
         narr_table.setStyle(TableStyle([
             ('BACKGROUND',    (0,0), (-1,-1), HexColor('#f0f4ff')),
             ('LEFTPADDING',   (0,0), (-1,-1), 10),
@@ -145,6 +153,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
         story.append(Spacer(1, 6*mm))
 
         # ── Scan Summary ──────────────────────────────────────────────────────────
+    story.append(CondPageBreak(45*mm))   # never strand a heading at a page foot
     story.append(Paragraph('Scan Summary', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     summary_data = [
@@ -172,6 +181,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(Spacer(1, 6*mm))
 
     # ── Consent Gaps ─────────────────────────────────────────────────────────
+    story.append(CondPageBreak(45*mm))   # never strand a heading at a page foot
     story.append(Paragraph(f'Consent Gaps Detected ({scan.gaps_count})', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     story.append(Spacer(1, 2*mm))
@@ -187,6 +197,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     story.append(Spacer(1, 6*mm))
 
     # ── Violations ───────────────────────────────────────────────────────────
+    story.append(CondPageBreak(45*mm))   # never strand a heading at a page foot
     story.append(Paragraph('DPDP Act Violations', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     story.append(Spacer(1, 2*mm))
@@ -202,25 +213,31 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
     vbody_style = ParagraphStyle('vbody', parent=small_style, leftIndent=2*mm)
     vfix_style  = ParagraphStyle('vfix', parent=fix_style, leftIndent=2*mm)
 
-    for v in violations:
+    from database import number_violations
+    for v in number_violations(violations):
         sev_color = SEVERITY_COLORS.get(v.severity, ORANGE)
         sev_label = _x((v.severity or '').upper())
 
         v_header = Table([[
+            Paragraph(_x(getattr(v, 'ref', None) or ''),
+                ParagraphStyle('vid', fontSize=9, leading=11, fontName='Courier-Bold',
+                    textColor=white, alignment=TA_CENTER)),
             Paragraph(f'{_x(v.dpdp_section)} — {_x(v.section_title)}',
-                ParagraphStyle('vh', fontSize=10, fontName='Helvetica-Bold', textColor=black)),
+                ParagraphStyle('vh', fontSize=10, leading=13, fontName='Helvetica-Bold', textColor=black)),
             Paragraph(sev_label,
                 ParagraphStyle('vb', fontSize=8, fontName='Helvetica-Bold',
                     textColor=white, alignment=TA_CENTER)),
-        ]], colWidths=[140*mm, 30*mm])
+        ]], colWidths=[16*mm, 126*mm, 28*mm])
         v_header.setStyle(TableStyle([
-            ('BACKGROUND', (1,0), (1,0), sev_color),
-            ('BACKGROUND', (0,0), (0,0), HexColor('#f8f8f8')),
+            ('BACKGROUND', (0,0), (0,0), NAVY),
+            ('BACKGROUND', (1,0), (1,0), HexColor('#f8f8f8')),
+            ('BACKGROUND', (2,0), (2,0), sev_color),
             ('TOPPADDING',    (0,0), (-1,-1), 6),
             ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-            ('LEFTPADDING',   (0,0), (0,0),  8),
+            ('LEFTPADDING',   (1,0), (1,0),  8),
             ('VALIGN',        (0,0), (-1,-1), 'MIDDLE'),
         ]))
+        v_header.keepWithNext = 1
         story.append(v_header)
         story.append(Spacer(1, 1.5*mm))
 
@@ -243,6 +260,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
 
     # ── All Findings ──────────────────────────────────────────────────────────
     story.append(Spacer(1, 3*mm))
+    story.append(CondPageBreak(45*mm))   # never strand a heading at a page foot
     story.append(Paragraph(f'All Code Findings ({len(findings)})', h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=NAVY))
     story.append(Spacer(1, 2*mm))
@@ -274,7 +292,7 @@ def generate_pdf(scan, violations, findings, compliance, narrative: str | None =
             origin_label.get(f.origin or 'first_party', f.origin or ''),
             Paragraph(_x(f.third_party_sdk or '—'), cell_style),
             Paragraph(_x(f.raw_text or ''), code_style),
-            Paragraph(_x(f.source or ''), cell_style),
+            Paragraph(_x(detector_label(f.source)), cell_style),
         ])
     if not rows:
         story.append(Paragraph('No findings.', body_style))

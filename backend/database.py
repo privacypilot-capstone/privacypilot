@@ -345,3 +345,15 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def number_violations(violations):
+    """Give each violation of a scan a short, stable ID ("V-01", "V-02", …)
+    in the order the scan recorded them, and return them in that order.
+    The same IDs appear in the web app, the HTML/PDF reports, the CSV export
+    and the AI summary, so a violation can be referred to unambiguously."""
+    # Stable sort: rows without an id (not yet saved) keep their given order.
+    vs = sorted(violations, key=lambda v: (getattr(v, "id", None) is None, getattr(v, "id", None) or 0))
+    width = max(2, len(str(len(vs))))
+    for i, v in enumerate(vs, 1):
+        v.ref = f"V-{i:0{width}d}"
+    return vs

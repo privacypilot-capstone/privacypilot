@@ -1,0 +1,11 @@
+
+/* ── Violation IDs and the formatted AI summary ── */
+.v-card-id { flex: none; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11.5px; font-weight: 700;
+  color: #fff; background: #0f172a; padding: 3px 7px; border-radius: 6px; letter-spacing: .02em; }
+.ai-card-body p { margin: 0 0 10px; }
+.ai-card-body p:last-child, .ai-card-body ul:last-child, .ai-card-body ol:last-child { margin-bottom: 0; }
+.ai-card-body ul, .ai-card-body ol { margin: 0 0 10px; padding-left: 22px; }
+.ai-card-body li { margin: 3px 0; }
+.ai-card-body code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .88em;
+  background: rgba(99,102,241,.08); color: #3730a3; padding: 1px 5px; border-radius: 4px; word-break: break-word; }
+.v-card-header .v-card-badge { min-width: 78px; text-align: center; justify-content: center; }

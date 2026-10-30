@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from './Layout';
+import { BarChart, CheckCircle, XCircle, AlertTriangle, Search } from './components/Icons';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -105,25 +106,25 @@ export default function History() {
         {/* Summary strip */}
         <div className="metrics-row mb-24">
           <div className="metric-card">
-            <div className="metric-icon" style={{ background: '#f0f4ff', fontSize: 20 }}>📊</div>
+            <div className="metric-icon" style={{ background: '#eef2ff', color: '#4f46e5' }}><BarChart size={20} /></div>
             <div className="metric-label">Total Scans</div>
             <div className="metric-value">{total}</div>
             <div className="metric-sub">all time</div>
           </div>
           <div className="metric-card">
-            <div className="metric-icon" style={{ background: '#f0fdf4', fontSize: 20 }}>✅</div>
+            <div className="metric-icon" style={{ background: '#f0fdf4', color: '#16a34a' }}><CheckCircle size={20} /></div>
             <div className="metric-label">Completed</div>
             <div className="metric-value" style={{ color: '#22c55e' }}>{done}</div>
             <div className="metric-sub">successful scans</div>
           </div>
           <div className="metric-card">
-            <div className="metric-icon" style={{ background: '#fef2f2', fontSize: 20 }}>❌</div>
+            <div className="metric-icon" style={{ background: '#fef2f2', color: '#dc2626' }}><XCircle size={20} /></div>
             <div className="metric-label">Failed</div>
             <div className="metric-value" style={{ color: failed > 0 ? '#ef4444' : '#94a3b8' }}>{failed}</div>
             <div className="metric-sub">scan errors</div>
           </div>
           <div className="metric-card">
-            <div className="metric-icon" style={{ background: '#fffbeb', fontSize: 20 }}>⚠️</div>
+            <div className="metric-icon" style={{ background: '#fffbeb', color: '#d97706' }}><AlertTriangle size={20} /></div>
             <div className="metric-label">With Violations</div>
             <div className="metric-value" style={{ color: critArr.length > 0 ? '#f59e0b' : '#22c55e' }}>{critArr.length}</div>
             <div className="metric-sub">repos need attention</div>
@@ -182,14 +183,14 @@ export default function History() {
 
           {error && !loading && (
             <div className="error-banner" style={{ margin: 20 }}>
-              <div className="error-icon">⚠️</div>
+              <div className="error-icon"><AlertTriangle size={18} /></div>
               <div className="error-text"><strong>Failed to load</strong>{error}</div>
             </div>
           )}
 
           {!loading && !error && filtered.length === 0 && (
             <div className="empty-state">
-              <div className="empty-icon">🔍</div>
+              <div className="empty-icon"><Search size={44} style={{ strokeWidth: 1.5 }} /></div>
               <div className="empty-title">
                 {scans.length === 0 ? 'No scans yet' : 'No results'}
               </div>

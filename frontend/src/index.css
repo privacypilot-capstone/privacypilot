@@ -3252,3 +3252,34 @@ input, textarea, select { font-family: var(--font); }
   caret-color: #fff;
   transition: background-color 9999s ease-out 0s;
 }
+
+
+/* ── Chat: floating launcher, viewport-sized panel, formatted replies ── */
+.chat-fab { width: auto; min-width: 52px; padding: 0 16px; gap: 8px; border-radius: 999px; }
+.chat-fab[aria-expanded="true"] { width: 52px; padding: 0; }
+.chat-fab-label { font-size: 13.5px; font-weight: 600; letter-spacing: .01em; }
+.chat-panel { height: min(560px, calc(100vh - 120px)); }
+.chat-bubble p { margin: 0 0 8px; }
+.chat-bubble p:last-child, .chat-bubble ul:last-child, .chat-bubble ol:last-child { margin-bottom: 0; }
+.chat-bubble ul, .chat-bubble ol { margin: 0 0 8px; padding-left: 18px; }
+.chat-bubble li { margin: 2px 0; }
+.chat-bubble strong { font-weight: 650; }
+.chat-bubble code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .86em;
+  background: rgba(127,127,127,.14); padding: 1px 5px; border-radius: 4px; word-break: break-word; }
+.chat-bubble .chat-md-h { font-weight: 650; margin-top: 4px; }
+@media (max-width: 600px) {
+  .chat-fab-label { display: none; }
+  .chat-fab { width: 52px; padding: 0; }
+  .chat-panel { bottom: 84px; height: calc(100vh - 110px); }
+}
+
+.about-avatar-photo { display: block; object-fit: cover; object-position: center 30%; background: #fff; padding: 0; }
+.about-team-card { display: flex; flex-direction: column; }
+.about-team-link { margin-top: auto; align-self: center; display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border: 1px solid #e5e7eb; border-radius: 999px; font-size: 13px; font-weight: 600;
+  color: #0a66c2; text-decoration: none; transition: background .15s, border-color .15s; }
+.about-team-card .about-team-bio { flex: 1; }
+.about-team-bio + .about-team-link { margin-top: 16px; }
+.about-avatar.about-avatar-photo { width: 76px; height: 76px; border-radius: 20px; }
+.about-team-link:hover { background: #eef5fc; border-color: #b9d5f0; }
+.about-team-link:focus-visible { outline: 2px solid #0a66c2; outline-offset: 2px; }

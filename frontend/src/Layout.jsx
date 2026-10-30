@@ -1,37 +1,7 @@
 import { Link, useLocation } from 'react-router-dom';
+import LogoMark from './components/LogoMark';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
-/* ── Brand mark ──────────────────────────────────────────────────────────── */
-const LogoMark = ({ size = 28, uid = 'sb' }) => {
-  const slId = `pp-sl-${uid}`;
-  const clId = `pp-cl-${uid}`;
-  const h = Math.round(size * 72 / 64);
-  return (
-    <svg width={size} height={h} viewBox="0 0 64 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id={slId} x1="0" y1="0" x2="64" y2="0" gradientUnits="userSpaceOnUse">
-          <stop offset="50%" stopColor="#0d1f3c"/>
-          <stop offset="50%" stopColor="#0e3535"/>
-        </linearGradient>
-        <clipPath id={clId}>
-          <path d="M32 3 L60 14 V38 C60 55 48 67 32 72 C16 67 4 55 4 38 V14 Z"/>
-        </clipPath>
-      </defs>
-      <path d="M32 3 L60 14 V38 C60 55 48 67 32 72 C16 67 4 55 4 38 V14 Z" fill={`url(#${slId})`}/>
-      <path d="M32 3 L60 14 V38 C60 55 48 67 32 72 C16 67 4 55 4 38 V14 Z" fill="none" stroke="rgba(255,255,255,0.18)" strokeWidth="1.2"/>
-      <line x1="32" y1="5" x2="32" y2="70" stroke="rgba(255,255,255,0.1)" strokeWidth="0.8" clipPath={`url(#${clId})`}/>
-      <rect x="31" y="30" width="2" height="22" fill="white"/>
-      <rect x="23" y="52" width="18" height="2.5" rx="1.2" fill="white"/>
-      <rect x="14" y="22" width="36" height="2" rx="1" fill="white"/>
-      <circle cx="32" cy="21" r="2.5" fill="white"/>
-      <rect x="14.5" y="24" width="1.5" height="9" fill="white"/>
-      <rect x="48" y="24" width="1.5" height="9" fill="white"/>
-      <path d="M10 33 Q15.75 41 21.5 33" stroke="white" strokeWidth="1.6" strokeLinecap="round" fill="none"/>
-      <path d="M42.5 33 Q48.25 41 54 33" stroke="white" strokeWidth="1.6" strokeLinecap="round" fill="none"/>
-    </svg>
-  );
-};
 
 // SVG icons as inline components
 const Icon = {
@@ -80,7 +50,7 @@ export default function Layout({ children }) {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div className="sidebar-logo-icon">
-            <LogoMark size={28} uid="sb" />
+            <LogoMark size={32} />
           </div>
           <div>
             <div className="sidebar-logo-text">PrivacyPilot</div>

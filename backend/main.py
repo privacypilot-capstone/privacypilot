@@ -22,6 +22,7 @@ from scoring import calculate_compliance_score
 from report_generator import generate_report_html
 from models.dataflow import PIICategory
 from llm_client import generate_report_summary, chat_completion, LLMNotConfiguredError
+from textfmt import clean_summary
 from security import seal, redact_secrets, install_log_redaction
 
 install_log_redaction()   # tokens and API keys never reach a log line
@@ -556,12 +557,17 @@ def _violation_locations(v) -> list:
     return violation_locations(v)
 
 
+def _violations(db, scan_id):
+    """A scan's violations in recorded order, each with its ID (V-01, …)."""
+    from database import number_violations
+    return number_violations(db.query(Violation).filter(Violation.scan_id == scan_id).all())
+
+
 @app.get("/scans/{scan_id}/violations")
 def get_violations(scan_id: int, db: Session = Depends(get_db)):
-    violations = db.query(Violation).filter(
-        Violation.scan_id == scan_id
-    ).all()
+    violations = _violations(db, scan_id)
     return [{
+        "ref":   getattr(v, "ref", None),
         "dpdp_section":   v.dpdp_section,
         "section_title":  v.section_title,
         "severity":       v.severity,
@@ -589,7 +595,7 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
             detail=f"Scan is still {scan.status}. Poll /scans/{scan_id}/status first.",
         )
 
-    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
+    violations = _violations(db, scan_id)
     findings   = _load_findings(db, scan, limit=30)
 
     class _FakeV:
@@ -617,6 +623,7 @@ def get_scan_result(scan_id: int, db: Session = Depends(get_db)):
         "compliance": compliance,
         "violations": [
             {
+                "ref":   getattr(v, "ref", None),
                 "dpdp_section":   v.dpdp_section,
                 "section_title":  v.section_title,
                 "severity":       v.severity,
@@ -741,7 +748,7 @@ def get_report(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
+    violations = _violations(db, scan_id)
     # EVERY finding: the report lists them all (the LLM narrative still gets
     # a sample of 10, as context only).
     findings   = _load_findings(db, scan)
@@ -759,7 +766,7 @@ def get_report(
     # ── Fetch or generate the LLM narrative ──────────────────────────────────
     # Use the cached ai_summary if available; otherwise generate on-the-fly
     # and cache it so future downloads are instant.
-    narrative: str | None = scan.ai_summary
+    narrative: str | None = clean_summary(scan.ai_summary)
     if narrative is None:
         try:
             scan_data = {
@@ -771,6 +778,7 @@ def get_report(
                 "compliance":          compliance,
                 "violations": [
                     {
+                        "ref":   getattr(v, "ref", None),
                         "dpdp_section":   v.dpdp_section,
                         "section_title":  v.section_title,
                         "severity":       v.severity,
@@ -854,17 +862,17 @@ def export_violations_csv(scan_id: int, db: Session = Depends(get_db)):
     from database import location_short
     if not db.query(Scan).filter(Scan.id == scan_id).first():
         raise HTTPException(status_code=404, detail="Scan not found")
-    vs = db.query(Violation).filter(Violation.scan_id == scan_id).order_by(Violation.id).all()
+    vs = _violations(db, scan_id)
 
     def rows():
         for v in vs:
             locs = _violation_locations(v)
-            yield [v.dpdp_section, v.section_title, v.severity, v.pii_category,
+            yield [v.ref, v.dpdp_section, v.section_title, v.severity, v.pii_category,
                    getattr(v, "recipient", None) or "", len(locs),
                    "; ".join(location_short(l) for l in locs),
                    v.evidence, v.recommendation]
 
-    return _csv_response(rows(), ["dpdp_section", "title", "severity", "pii_category",
+    return _csv_response(rows(), ["id", "dpdp_section", "title", "severity", "pii_category",
                                   "recipient", "location_count", "locations",
                                   "evidence", "recommendation"],
                          f"violations_{scan_id}.csv")
@@ -909,10 +917,10 @@ def get_scan_summary(scan_id: int, db: Session = Depends(get_db)):
 
     # Return cached summary if available
     if scan.ai_summary:
-        return {"scan_id": scan_id, "summary": scan.ai_summary, "cached": True}
+        return {"scan_id": scan_id, "summary": clean_summary(scan.ai_summary), "cached": True}
 
     # Build a minimal scan_data dict from DB rows
-    violations = db.query(Violation).filter(Violation.scan_id == scan_id).all()
+    violations = _violations(db, scan_id)
     findings   = _load_findings(db, scan, limit=10)
 
     from scoring import calculate_compliance_score
@@ -934,6 +942,7 @@ def get_scan_summary(scan_id: int, db: Session = Depends(get_db)):
         "compliance":           compliance,
         "violations":           [
             {
+                "ref":  getattr(v, "ref", None),
                 "dpdp_section":  v.dpdp_section,
                 "section_title": v.section_title,
                 "severity":      v.severity,
@@ -1019,7 +1028,7 @@ def send_chat_message(
 
     # Reconstruct scan_data context from DB
     scan = session.scan if hasattr(session, "scan") else            db.query(Scan).filter(Scan.id == session.scan_id).first()
-    violations = db.query(Violation).filter(Violation.scan_id == scan.id).all()
+    violations = _violations(db, scan.id)
     findings   = _load_findings(db, scan, limit=10)
 
     from scoring import calculate_compliance_score
@@ -1041,6 +1050,7 @@ def send_chat_message(
         "compliance":          compliance,
         "violations": [
             {
+                "ref":  getattr(v, "ref", None),
                 "dpdp_section":  v.dpdp_section,
                 "section_title": v.section_title,
                 "severity":      v.severity,

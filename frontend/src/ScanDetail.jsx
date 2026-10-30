@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import Layout from './Layout';
+import { AlertTriangle, FileText, Download } from './components/Icons';
 import ResultsDashboard from './components/ResultsDashboard';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -82,7 +83,7 @@ export default function ScanDetail() {
         </div>
         <div className="page-content">
           <div className="error-banner">
-            <div className="error-icon">⚠️</div>
+            <div className="error-icon"><AlertTriangle size={18} /></div>
             <div className="error-text">
               <strong>Failed to load scan</strong>
               {error}
@@ -115,7 +116,7 @@ export default function ScanDetail() {
             rel="noreferrer"
             className="btn btn-secondary btn-sm"
           >
-            📄 HTML Report
+            <FileText size={14} style={{ marginRight: 6 }} />HTML Report
           </a>
           <a
             href={`${API}/report/${scanId}?format=pdf`}
@@ -123,7 +124,7 @@ export default function ScanDetail() {
             rel="noreferrer"
             className="btn btn-primary btn-sm"
           >
-            ⬇ PDF Report
+            <Download size={14} style={{ marginRight: 6 }} />PDF Report
           </a>
         </div>
       </div>

@@ -115,3 +115,7 @@ pytest -q tests
 Scoring an evaluation run: `python eval/compute_metrics.py [--contract-unverified count|ignore] [--ground-truth PATH]`. Reported violations are compared as (rule, category, recipient) with duplicates removed; `--contract-unverified ignore` leaves out Section 8(2) items where the policy already names the recipient. The script also prints per-rule results.
 
 `prototypes/` holds the early feasibility scripts used to check whether each planned strategy would work. They carry their own copies of the logic, are not part of the test suite, and are kept for reference only.
+
+## Contact
+
+Questions, demo requests and requests to withdraw consent or erase demo-request details: [privacypilot4u@gmail.com](mailto:privacypilot4u@gmail.com).

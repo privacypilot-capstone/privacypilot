@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import './landing.css';
 import DemoModal from './components/DemoModal';
 import { CONTACT_EMAIL } from './legalNotice';
+import LogoMark from './components/LogoMark';
 
 // ── Icon Components ────────────────────────────────────────────────────────
 const FI = {
@@ -83,29 +84,6 @@ const FI = {
     </svg>
   ),
 };
-
-// ── LogoMark ───────────────────────────────────────────────────────────────
-function LogoMark({ size = 32 }) {
-  const uid = useRef(`lm-${Math.random().toString(36).slice(2)}`).current;
-  return (
-    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id={uid} x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#10b981"/>
-          <stop offset="100%" stopColor="#059669"/>
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="13" fill={`url(#${uid})`}/>
-      <circle cx="24" cy="24" r="9" stroke="rgba(255,255,255,0.9)" strokeWidth="2.5" fill="none"/>
-      <circle cx="24" cy="24" r="4.5" stroke="rgba(255,255,255,0.7)" strokeWidth="2" fill="none"/>
-      <circle cx="24" cy="24" r="2" fill="white"/>
-      <line x1="24" y1="6" x2="24" y2="11" stroke="rgba(255,255,255,0.5)" strokeWidth="2" strokeLinecap="round"/>
-      <line x1="24" y1="37" x2="24" y2="42" stroke="rgba(255,255,255,0.5)" strokeWidth="2" strokeLinecap="round"/>
-      <line x1="6" y1="24" x2="11" y2="24" stroke="rgba(255,255,255,0.5)" strokeWidth="2" strokeLinecap="round"/>
-      <line x1="37" y1="24" x2="42" y2="24" stroke="rgba(255,255,255,0.5)" strokeWidth="2" strokeLinecap="round"/>
-    </svg>
-  );
-}
 
 // ── useInView ──────────────────────────────────────────────────────────────
 function useInView(opts = {}) {
@@ -746,6 +724,7 @@ export default function Landing() {
               <span className="lp-footer-name">PrivacyPilot</span>
             </div>
             <p>DPDP Act 2023 compliance checks for source code and privacy policies.</p>
+            {CONTACT_EMAIL && <a className="lp-footer-mail" href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>}
           </div>
           <nav className="lp-footer-col" aria-label="Product">
             <h4>Product</h4>
