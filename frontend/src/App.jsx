@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from './Layout';
 import ResultsDashboard from './components/ResultsDashboard';
@@ -78,9 +78,25 @@ export default function App() {
   // Which step is active comes from the scan's real phase on the server
   // (not a timer): downloading → scanning (with file counts) → finalizing.
   const phase   = live?.phase || 'queued';
-  const stepIdx = phase === 'finalizing' ? 3
-                : phase === 'scanning'   ? 1
-                : 0;
+  const waiting = phase.startsWith('waiting');
+  const total   = live?.files_total ?? null;
+  // Code scan is finished when every chunk is saved (files_complete), not
+  // merely when the live counter reaches the total.
+  const codeDone = phase === 'finalizing'
+                || (phase === 'scanning' && total != null
+                    && (live?.files_complete ?? live?.files_done ?? 0) >= total);
+  const polState = live?.policy;   // queued | parsing | done | failed (null on older servers)
+  const policyDone = phase === 'finalizing' || polState === 'done' || polState === 'failed';
+  // State of each step: 'done' | 'active' | 'pending'
+  const stepState = [
+    phase === 'scanning' || phase === 'finalizing' ? 'done' : 'active',
+    phase === 'scanning' ? (codeDone ? 'done' : 'active') : phase === 'finalizing' ? 'done' : 'pending',
+    phase === 'scanning'
+      ? (policyDone ? 'done' : (polState === 'parsing' || polState == null || codeDone) ? 'active' : 'pending')
+      : phase === 'finalizing' ? 'done' : 'pending',
+    phase === 'finalizing' ? 'active' : 'pending',
+  ];
+  const stepIdx = Math.max(0, stepState.indexOf('active'));
 
   const fetchAI = async (scanId) => {
     setAiLoad(true);
@@ -128,7 +144,7 @@ export default function App() {
       // No fixed time limit: a large repository simply takes longer. The
       // server marks a scan failed only when it stops making progress, so
       // polling ends either way.
-      const POLL_INTERVAL = 4000;   // ms between polls
+      const POLL_INTERVAL = 2000;   // ms between polls
       for (;;) {
         await new Promise(res => setTimeout(res, POLL_INTERVAL));
         const sr = await fetch(`${API}/scans/${scan_id}/status`);
@@ -156,16 +172,35 @@ export default function App() {
   };
 
   const canScan  = repo.trim() && policy.trim() && token.trim() && !loading;
-  // Overall progress across all phases, not just the file count of one phase:
-  // downloading 0–10 %, scanning 10–80 %, final checks 80–95 %.
-  const progress = phase === 'finalizing' ? 88
-                 : phase === 'scanning'   ? 10 + 0.7 * Math.min(100, live?.percent ?? 0)
-                 : 4;
-  const stepSub  = phase === 'scanning' && live?.files_total != null
-                 ? `${live.files_done.toLocaleString()} of ${live.files_total.toLocaleString()} source files scanned`
-                 : phase.startsWith('waiting')
-                 ? 'Waiting for the GitHub API rate limit to reset'
-                 : SCAN_STEPS[stepIdx].sub;
+  // Overall progress across all phases, weighted by how long each takes:
+  // download 0–10 %, code 10–75 %, policy up to +15 %, final checks 90–97 %.
+  // The bar never moves backwards between polls.
+  const codeFrac = total ? Math.min(1, (live?.files_done ?? 0) / total) : (codeDone ? 1 : 0);
+  const polFrac  = policyDone ? 1 : polState === 'parsing' ? 0.4 : 0;
+  const target   = phase === 'finalizing' ? 93
+                 : phase === 'scanning'   ? 10 + 65 * codeFrac + 15 * polFrac
+                 : phase === 'downloading' || waiting ? 6
+                 : 2;
+  const maxProg  = useRef(0);
+  if (!loading) maxProg.current = 0;
+  const progress = Math.max(maxProg.current, target);
+  maxProg.current = progress;
+
+  const fmt = (n) => (n ?? 0).toLocaleString();
+  const label = phase === 'queued' && stepIdx === 0 ? 'Waiting for a free scanner'
+              : waiting ? 'Paused for GitHub'
+              : SCAN_STEPS[stepIdx].label;
+  const stepSub = phase === 'queued'
+                ? 'Your scan is in the queue and will start shortly'
+                : waiting
+                ? 'Waiting for the GitHub API rate limit to reset; the scan continues automatically'
+                : stepIdx === 1 && total != null && live.files_done >= total
+                ? `All ${fmt(total)} source files read; saving the last results`
+                : stepIdx === 1 && total != null
+                ? `${fmt(live.files_done)} of ${fmt(total)} source files scanned`
+                : stepIdx === 2 && codeDone
+                ? `Code scan complete (${fmt(total)} files). Finishing the policy analysis`
+                : SCAN_STEPS[stepIdx].sub;
 
   /* ─── Results view (keeps sidebar Layout) ─────────────────── */
   if (result && !loading) {
@@ -227,7 +262,7 @@ export default function App() {
               <div className="sa-ring-icon"><SearchIcon /></div>
             </div>
 
-            <div className="sa-loading-step-label">{SCAN_STEPS[stepIdx].label}</div>
+            <div className="sa-loading-step-label">{label}</div>
             <div className="sa-loading-step-sub">{stepSub}</div>
 
             <div className="sa-prog-track">
@@ -238,9 +273,8 @@ export default function App() {
 
             <div className="sa-steps-list">
               {SCAN_STEPS.map((s, i) => {
-                const p = phase.startsWith('waiting') ? 'downloading' : phase;
-                const active = s.phases.includes(p);
-                const done = !active && i < SCAN_STEPS.findIndex(x => x.phases.includes(p));
+                const active = stepState[i] === 'active';
+                const done = stepState[i] === 'done';
                 return (
                 <div
                   key={i}

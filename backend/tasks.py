@@ -282,6 +282,8 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
             phase="scanning",
             files_total=len(to_scan),
             files_done=0,
+            files_seen=0,
+            policy_state="queued",
             chunks_total=len(chunks),
             coverage=json.dumps({
                 "total_source_files": len(manifest["files"]),
@@ -293,7 +295,7 @@ def run_scan_task(self, scan_id: int, repo_url: str, token: str, policy_url: str
         header = [
             scan_chunk_task.s(scan_id, i, 1, ref.full_name, ref.sha, paths, token)
             for i, paths in enumerate(chunks)
-        ] + [parse_policy_task.s(policy_url, token)]
+        ] + [parse_policy_task.s(policy_url, token, scan_id)]
         # on_error: if any task of the chord raises (e.g. a database error
         # while saving a chunk), the scan is marked failed with that error at
         # once, instead of sitting "running" until the stall detector fires.
@@ -329,7 +331,8 @@ def scan_chunk_task(self, scan_id: int, chunk_no: int, round_no: int,
     from scanners import repo_snapshot as rs
 
     try:
-        result = run_chunk(rs.SnapshotReader(rs.RepoRef(full_name, sha), unseal(token)), paths)
+        result = run_chunk(rs.SnapshotReader(rs.RepoRef(full_name, sha), unseal(token)), paths,
+                           on_files=lambda n: _bump_seen(scan_id, n))
     except rs.RateLimited as e:
         raise self.retry(countdown=e.retry_after, exc=e)
     if result["unfinished"]:
@@ -362,13 +365,20 @@ def _save_with_retry(scan_id: int, chunk_no: int, round_no: int, result: dict) -
             time.sleep(2 * attempt)
 
 
-def run_chunk(reader, paths: list) -> dict:
+PROGRESS_EVERY_S = 1.5   # how often a chunk reports files finished so far
+
+
+def run_chunk(reader, paths: list, on_files=None) -> dict:
     """Scan `paths` one file at a time; on the soft time limit, return what
-    is done plus the files not finished (the current one included)."""
+    is done plus the files not finished (the current one included).
+
+    on_files(n), if given, is called at most every PROGRESS_EVERY_S seconds
+    with the number of files finished since the last call, so the progress
+    bar moves while a chunk is running and not only when it is saved."""
     from scanners.code_scanner import scan_files
 
     out = {"findings": [], "usage_map": {}, "scanned": [], "failed": {}, "unfinished": []}
-    i = 0
+    i, pending, last = 0, 0, time.monotonic()
     try:
         for i, path in enumerate(paths):
             f, u, st = scan_files(reader, [path])
@@ -377,9 +387,30 @@ def run_chunk(reader, paths: list) -> dict:
                 out["usage_map"].setdefault(cat, set()).update(mods)
             out["scanned"].extend(st["scanned"])
             out["failed"].update(st["failed"])
+            pending += 1
+            if on_files and time.monotonic() - last >= PROGRESS_EVERY_S:
+                try:
+                    on_files(pending)
+                except Exception as e:          # progress is cosmetic; never fail a chunk for it
+                    print(f"[task] progress update failed: {e}")
+                pending, last = 0, time.monotonic()
     except SoftTimeLimitExceeded:
         out["unfinished"] = list(paths[i:])
     return out
+
+
+def _bump_seen(scan_id: int, n: int) -> None:
+    """Add n to the live file counter of a running scan (atomic increment)."""
+    from database import Scan
+    db = _db()
+    try:
+        db.query(Scan).filter(Scan.id == scan_id).update({
+            Scan.files_seen: Scan.files_seen + n,
+            Scan.last_progress_at: datetime.utcnow(),
+        }, synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def save_chunk(scan_id: int, chunk_no: int, round_no: int, result: dict) -> None:
@@ -415,15 +446,27 @@ def save_chunk(scan_id: int, chunk_no: int, round_no: int, result: dict) -> None
 # ── 3. Privacy policy (in parallel with the chunks) ──────────────────────────
 
 @celery_app.task(name="tasks.parse_policy_task", soft_time_limit=540, time_limit=600)
-def parse_policy_task(policy_url: str, token: str):
+def parse_policy_task(policy_url: str, token: str, scan_id: int | None = None):
     """The policy is one document, so this task's time does not depend on
     the repository. Errors are returned (not raised) so the finalize step
-    can report them on the scan."""
+    can report them on the scan. With scan_id, its state (parsing → done or
+    failed) is recorded on the scan for the progress screen."""
     from scanners.policy_parser import parse_privacy_policy
+
+    def state(s):
+        if scan_id is not None:
+            try:
+                _update_scan(scan_id, policy_state=s)
+            except Exception as e:
+                print(f"[task] policy state update failed: {e}")
+
+    state("parsing")
     try:
         claims, purpose_map, vagueness, disclosed = parse_privacy_policy(policy_url, unseal(token))
     except Exception as e:
+        state("failed")
         return {"policy_error": f"Privacy policy could not be processed: {e}"}
+    state("done")
     return {"policy": {
         "claims":       _findings_to_json(claims),
         "purpose_map":  _catmap_to_json(purpose_map),

@@ -55,6 +55,11 @@ class Scan(Base):
     phase            = Column(String, nullable=True)
     files_total      = Column(Integer, nullable=True)   # source files to scan
     files_done       = Column(Integer, default=0)       # scanned or failed so far
+    # Live progress inside running chunks (files_done moves only when a whole
+    # chunk of up to 100 files is saved). Approximate; capped at files_total.
+    files_seen       = Column(Integer, default=0)
+    # The privacy policy is parsed in parallel: queued → parsing → done/failed
+    policy_state     = Column(String, nullable=True)
     chunks_total     = Column(Integer, nullable=True)
     # Heartbeat: updated on every completed chunk and during the download.
     # A scan is declared dead only when THIS stops moving, never because
@@ -211,6 +216,8 @@ def migrate_tables():
         "ALTER TABLE scans ADD COLUMN phase VARCHAR",
         "ALTER TABLE scans ADD COLUMN files_total INTEGER",
         "ALTER TABLE scans ADD COLUMN files_done INTEGER DEFAULT 0",
+        "ALTER TABLE scans ADD COLUMN files_seen INTEGER DEFAULT 0",
+        "ALTER TABLE scans ADD COLUMN policy_state VARCHAR",
         "ALTER TABLE scans ADD COLUMN chunks_total INTEGER",
         "ALTER TABLE scans ADD COLUMN last_progress_at TIMESTAMP",
         "ALTER TABLE scans ADD COLUMN coverage TEXT",

@@ -1291,8 +1291,36 @@ def test_S8_scan_with_no_progress_anywhere_is_failed(mem_db):
 
 def test_S8_progress_payload():
     import main
-    p = main._progress(_NS(phase="scanning", status="running", files_total=5210, files_done=1840))
-    assert p == {"phase": "scanning", "files_total": 5210, "files_done": 1840, "percent": 35.3}
+    p = main._progress(_NS(phase="scanning", status="running", files_total=5210, files_done=1840,
+                           files_seen=0, policy_state="parsing"))
+    assert p == {"phase": "scanning", "files_total": 5210, "files_done": 1840,
+                 "files_complete": 1840, "policy": "parsing", "percent": 35.3}
+
+
+def test_S8_live_count_moves_before_a_chunk_is_saved_and_is_capped():
+    import main
+    # 37 files read inside running chunks, no chunk saved yet
+    p = main._progress(_NS(phase="scanning", status="running", files_total=240, files_done=0,
+                           files_seen=37, policy_state="queued"))
+    assert (p["files_done"], p["files_complete"], p["percent"]) == (37, 0, 15.4)
+    # a retried chunk can push files_seen past the total: never shown above it
+    p = main._progress(_NS(phase="scanning", status="running", files_total=240, files_done=200,
+                           files_seen=260, policy_state="done"))
+    assert (p["files_done"], p["files_complete"]) == (240, 200)
+
+
+def test_S8_run_chunk_reports_files_while_running(monkeypatch):
+    import tasks
+    import scanners.code_scanner as cs
+    monkeypatch.setattr(cs, "scan_files", lambda reader, paths: ([], {}, {"scanned": paths, "failed": {}}))
+    monkeypatch.setattr(tasks, "PROGRESS_EVERY_S", 0)
+    seen = []
+    out = tasks.run_chunk(None, ["a.py", "b.py", "c.py"], on_files=seen.append)
+    assert sum(seen) == 3 and out["scanned"] == ["a.py", "b.py", "c.py"]
+    # a failing progress callback never fails the chunk
+    def boom(n): raise RuntimeError("db down")
+    out = tasks.run_chunk(None, ["a.py"], on_files=boom)
+    assert out["scanned"] == ["a.py"]
 
 
 

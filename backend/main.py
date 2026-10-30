@@ -150,12 +150,19 @@ def _coverage_summary(scan) -> dict | None:
 
 def _progress(scan) -> dict:
     total = scan.files_total
-    done = min(scan.files_done or 0, total) if total is not None else None
+    # files_done moves only when a whole chunk (up to 100 files) is saved;
+    # files_seen moves every couple of seconds while chunks run. Show the
+    # live count, and report saved chunks separately as files_complete.
+    complete = min(scan.files_done or 0, total) if total is not None else None
+    done = (min(total, max(complete, scan.files_seen or 0))
+            if total is not None else None)
     return {
-        "phase":       scan.phase or scan.status,
-        "files_total": total,
-        "files_done":  done,
-        "percent":     (round(100 * done / total, 1) if total else None),
+        "phase":          scan.phase or scan.status,
+        "files_total":    total,
+        "files_done":     done,
+        "files_complete": complete,
+        "policy":         scan.policy_state,   # queued | parsing | done | failed
+        "percent":        (round(100 * done / total, 1) if total else None),
     }
 
 
