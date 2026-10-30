@@ -39,7 +39,7 @@ const VALUES = [
       </svg>
     ),
     title: 'Accuracy first',
-    desc: 'Every check maps to a specific provision of the DPDP Act 2023 or DPDP Rules 2025. No generic advice, no invented obligations.',
+    desc: 'Every check maps to a specific provision of the DPDP Act 2023 or DPDP Rules 2025. Where PrivacyPilot adds its own judgement, such as treating Aadhaar or health data as critical, it says so.',
   },
   {
     icon: (
@@ -58,7 +58,7 @@ const VALUES = [
       </svg>
     ),
     title: 'Speed',
-    desc: 'A full repository audit should take minutes, not weeks. PrivacyPilot runs PII detection, policy parsing, and rule checks in parallel — done under 2 minutes.',
+    desc: 'A repository audit should take minutes, not weeks. PrivacyPilot scans code in parallel chunks while it reads the privacy policy: about half a minute for a small repository, a few minutes for one with 1,500 source files.',
   },
   {
     icon: (
@@ -99,8 +99,8 @@ export default function AboutUs() {
           <h1 className="about-h1">Built by engineers who read the Act</h1>
           <p className="about-sub">
             PrivacyPilot is a B.Tech capstone project at MPSTME, Mumbai —
-            an automated DPDPA compliance engine that does the work lawyers and auditors
-            spend weeks on, in under two minutes.
+            an automated DPDP Act compliance engine that checks an application's source code
+            against its privacy policy, in minutes.
           </p>
         </section>
 
@@ -125,7 +125,7 @@ export default function AboutUs() {
               <span className="about-what-num">01</span>
               <div>
                 <div className="about-what-title">Scans your repository</div>
-                <p className="about-what-desc">Regex + NER classifiers detect every PII category across 20+ types in all files — not just surface strings but contextual usage.</p>
+                <p className="about-what-desc">Pattern matching, named-entity recognition and data-flow tracking find ten kinds of personal data (Aadhaar, PAN, health, financial, biometric and more) in every source file, and follow where the data goes.</p>
               </div>
             </div>
             <div className="about-what-item">
@@ -139,14 +139,14 @@ export default function AboutUs() {
               <span className="about-what-num">03</span>
               <div>
                 <div className="about-what-title">Runs five DPDPA rule checks</div>
-                <p className="about-what-desc">S.5, S.6(1), S.8(2), S.8(5), and Rule 3(b)(ii) — each mapped to a deterministic algorithm, not an LLM guess.</p>
+                <p className="about-what-desc">S.5, S.6(1), S.8(2), S.8(5) and Rule 3(b)(ii). The checks are fixed rules (judging vague purpose wording also uses a small language model); no generative AI is used to find violations.</p>
               </div>
             </div>
             <div className="about-what-item">
               <span className="about-what-num">04</span>
               <div>
                 <div className="about-what-title">Delivers a compliance report</div>
-                <p className="about-what-desc">Score, violation breakdown, AI executive summary via Gemini/Claude, and a downloadable PDF — ready for your DPO in minutes.</p>
+                <p className="about-what-desc">Score, violation breakdown with exact code locations, an AI executive summary (Google Gemini, with OpenAI as fallback), and downloadable PDF, HTML and CSV reports.</p>
               </div>
             </div>
           </div>
@@ -201,10 +201,13 @@ export default function AboutUs() {
           <div className="about-tech-grid">
             {[
               ['Frontend', 'React · Vite · React Router'],
-              ['NLP / ML', 'spaCy · scikit-learn · sentence-transformers'],
-              ['Backend', 'FastAPI · Python'],
-              ['AI Summary', 'Google Gemini · Anthropic Claude'],
-              ['Reports', 'WeasyPrint · PDF generation'],
+              ['Backend', 'Python · FastAPI'],
+              ['Scan pipeline', 'Celery workers · Redis · PostgreSQL'],
+              ['Code analysis', 'Python ast · tree-sitter (JavaScript / TypeScript) · data-flow tracking'],
+              ['NLP', 'spaCy · Microsoft Presidio · sentence-transformers'],
+              ['AI summary & chat', 'Google Gemini · OpenAI (fallback)'],
+              ['Reports', 'ReportLab (PDF) · HTML · CSV'],
+              ['Security', 'Encrypted GitHub tokens · personal data masked before any AI call'],
               ['Act coverage', 'DPDP Act 2023 · DPDP Rules 2025'],
             ].map(([label, stack], i) => (
               <div key={i} className="about-tech-item">

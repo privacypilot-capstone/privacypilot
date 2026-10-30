@@ -113,7 +113,7 @@ function AISummary({ text }) {
           <div className="ai-card-title">AI Executive Summary</div>
         </div>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#818cf8', fontWeight: 600 }}>
-          Powered by Gemini / GPT
+          Powered by Gemini / OpenAI
         </span>
       </div>
       <div className="ai-card-body">

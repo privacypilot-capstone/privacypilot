@@ -322,7 +322,7 @@ const FEATURES = [
   { icon: <XI.Gauge />,   title: 'Built for large repositories',
     desc: 'Files are scanned in parallel chunks of up to 100, so each task’s time depends on its own files. The largest repository we tested had 1,568 source files.' },
   { icon: <FI.Sparkle />, title: 'Optional AI summary and chat',
-    desc: 'With a Gemini, OpenAI or Anthropic key, an LLM writes an executive summary and answers questions about a scan. Secrets and personal values are masked first, and detection never uses an LLM.' },
+    desc: 'With a Gemini or OpenAI key, an LLM writes an executive summary and answers questions about a scan. Secrets and personal values are masked first, and detection never uses an LLM.' },
   { icon: <FI.FileDown />, title: 'Reports and exports',
     desc: 'HTML and PDF reports, CSV exports of every violation and every finding, and a REST API with interactive documentation.' },
   { icon: <XI.Lock />,    title: 'Secure by design',
